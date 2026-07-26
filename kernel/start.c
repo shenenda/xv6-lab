@@ -7,6 +7,9 @@
 void main();
 void timerinit();
 
+// pmpinit 只在当前 start.c 中使用，因此声明为 static
+static void pmpinit(void);
+
 // entry.S needs one stack per CPU.
 __attribute__ ((aligned (16))) char stack0[4096 * NCPU];
 
@@ -46,7 +49,21 @@ start()
   w_tp(id);
 
   // switch to supervisor mode and jump to main().
+  // 允许 Supervisor Mode 访问物理内存
+  pmpinit();
   asm volatile("mret");
+}
+
+// 配置一个覆盖整个物理地址空间的 PMP 区域，
+// 允许 Supervisor Mode 读、写和执行。
+static void
+pmpinit(void)
+{
+  // 匹配可用的物理地址范围
+  w_pmpaddr0((~0ULL) >> 10);
+
+  // 允许读、写、执行，并使用 NAPOT 地址匹配模式
+  w_pmpcfg0(PMP_R | PMP_W | PMP_X | PMP_MATCH_NAPOT);
 }
 
 // set up to receive timer interrupts in machine mode,
