@@ -38,6 +38,28 @@ w_mepc(uint64 x)
   asm volatile("csrw mepc, %0" : : "r" (x));
 }
 
+// PMP 权限位：读、写、执行
+#define PMP_R (1L << 0)
+#define PMP_W (1L << 1)
+#define PMP_X (1L << 2)
+
+// NAPOT：Naturally Aligned Power-Of-Two 匹配模式
+#define PMP_MATCH_NAPOT (3L << 3)
+
+// 写入第 0 组 PMP 配置寄存器
+static inline void
+w_pmpcfg0(uint64 x)
+{
+  asm volatile("csrw pmpcfg0, %0" : : "r" (x));
+}
+
+// 写入第 0 个 PMP 地址寄存器
+static inline void
+w_pmpaddr0(uint64 x)
+{
+  asm volatile("csrw pmpaddr0, %0" : : "r" (x));
+}
+
 // Supervisor Status Register, sstatus
 
 #define SSTATUS_SPP (1L << 8)  // Previous mode, 1=Supervisor, 0=User
