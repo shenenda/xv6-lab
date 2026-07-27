@@ -104,6 +104,8 @@ extern uint64 sys_unlink(void);
 extern uint64 sys_wait(void);
 extern uint64 sys_write(void);
 extern uint64 sys_uptime(void);
+extern uint64 sys_trace(void); //全局声明trace系统调用处理函数
+extern uint64 sys_sysinfo(void); //全局声明sysinfo系统调用处理函数
 
 static uint64 (*syscalls[])(void) = {
 [SYS_fork]    sys_fork,
@@ -127,20 +129,96 @@ static uint64 (*syscalls[])(void) = {
 [SYS_link]    sys_link,
 [SYS_mkdir]   sys_mkdir,
 [SYS_close]   sys_close,
+[SYS_trace]   sys_trace,
+[SYS_sysinfo] sys_sysinfo,
 };
 
+// kernel/syscall.c
+// 定义系统调用名称的字符串数组
+const char* kama_syscall_names[] = {
+    [SYS_fork]    "fork",
+    [SYS_exit]    "exit",
+    [SYS_wait]    "wait",
+    [SYS_pipe]    "pipe",
+    [SYS_read]    "read",
+    [SYS_kill]    "kill",
+    [SYS_exec]    "exec",
+    [SYS_fstat]   "fstat",
+    [SYS_chdir]   "chdir",
+    [SYS_dup]     "dup",
+    [SYS_getpid]  "getpid",
+    [SYS_sbrk]    "sbrk",
+    [SYS_sleep]   "sleep",
+    [SYS_uptime]  "uptime",
+    [SYS_open]    "open",
+    [SYS_write]   "write",
+    [SYS_mknod]   "mknod",
+    [SYS_unlink]  "unlink",
+    [SYS_link]    "link",
+    [SYS_mkdir]   "mkdir",
+    [SYS_close]   "close",
+    [SYS_trace]   "trace",
+    [SYS_sysinfo] "sysinfo",
+};
+
+// kernel/syscall.c
+//根据a7中的系统调用编号找到并执行对应的内核函数，将返回值写回a0；
+//如果当前进程的跟踪掩码包含该系统调用，则打印PID、系统调用名称和返回值。
 void
 syscall(void)
 {
   int num;
+
+  // 获取当前正在运行的进程控制块。
+  // p（结构体指针）指向当前进程对应的 struct proc。
   struct proc *p = myproc();
 
+  // 用户程序执行系统调用前，会把系统调用编号放入 a7 寄存器。
+  // 进入内核时，用户态寄存器被保存到 trapframe，
+  // 因此这里从 trapframe->a7 中取出系统调用编号。
   num = p->trapframe->a7;
+
+  // 判断系统调用编号是否合法：
+  // 1. num > 0：xv6 的有效系统调用编号从 1 开始；
+  // 2. num < NELEM(syscalls)：防止数组下标越界；
+  // 3. syscalls[num] != 0：该编号确实注册了处理函数。
   if(num > 0 && num < NELEM(syscalls) && syscalls[num]) {
+
+    // syscalls 是系统调用处理函数指针数组。
+    //
+    // 例如 num == SYS_read 时：
+    // syscalls[num]() 实际调用 sys_read()。
+    //
+    // 系统调用执行后的返回值保存到 trapframe->a0。
+    // 内核返回用户态后，用户程序会从 a0 中得到返回值。
     p->trapframe->a0 = syscalls[num]();
+
+    // 判断当前进程是否要求跟踪编号为 num 的系统调用。
+    //
+    // kama_syscall_trace 是位掩码：
+    // 将它右移 num 位后，再与 1 做按位与，
+    // 就能检查第 num 位是不是 1。
+    if((p->kama_syscall_trace >> num) & 1) {
+
+      // 只有对应位为 1 时，才打印系统调用跟踪信息。
+      //
+      // p->pid：当前进程 PID；
+      // kama_syscall_names[num]：当前系统调用名称；
+      // p->trapframe->a0：该系统调用的返回值。
+      printf("%d: syscall %s -> %d\n",
+              p->pid,
+              kama_syscall_names[num],
+              p->trapframe->a0);
+    }
+
   } else {
+    // 系统调用编号无效，或者没有注册对应的处理函数。
     printf("%d %s: unknown sys call %d\n",
-            p->pid, p->name, num);
+           p->pid,
+           p->name,
+           num);
+
+    // 向用户态返回 -1，表示系统调用失败。
     p->trapframe->a0 = -1;
   }
 }

@@ -89,13 +89,14 @@ allocpid() {
 // If found, initialize state required to run in the kernel,
 // and return with p->lock held.
 // If there are no free procs, or a memory allocation fails, return 0.
-static struct proc*
+// 在进程表中找一个空闲的 proc 结构，给它分配 PID、陷阱帧、页表和内核执行上下文，初始化成一个可以继续创建的“新进程槽位”。
+static struct proc* //返回找到的新进程控制块地址
 allocproc(void)
 {
   struct proc *p;
 
   for(p = proc; p < &proc[NPROC]; p++) {
-    acquire(&p->lock);
+    acquire(&p->lock); //因为可能有多个CPU同时创建进程，同名看见的进程都是UNUSED
     if(p->state == UNUSED) {
       goto found;
     } else {
@@ -108,12 +109,16 @@ found:
   p->pid = allocpid();
 
   // Allocate a trapframe page.
+  //kalloc()分配一个物理页，返回该页的地址
+  //struct trapframe *把该地址解释成指向结构体对象的指针
+  //==0判断分配是否失败
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
     release(&p->lock);
     return 0;
   }
 
   // An empty user page table.
+  //为这个进程创建一份用户页表
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){
     freeproc(p);
@@ -124,10 +129,16 @@ found:
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
+  //设置第一次调度的入口：ra 是 RISC-V 的返回地址寄存器。
+  //这里把它设为 forkret 的地址，意思是：
+  //这个新进程第一次被调度时，从 forkret() 开始执行。
   p->context.ra = (uint64)forkret;
+  //sp是栈指针。 p->kstack是内核栈的最低地址，而一页大小是：PGSIZE。那么：p->kstack + PGSIZE就是栈顶。
   p->context.sp = p->kstack + PGSIZE;
+  //系统调用跟踪掩码：创建新进程的时候，设置为默认值0表示不跟踪任何系统调用
+  p->kama_syscall_trace = 0; 
 
-  return p;
+  return p; //此时p仍然持有锁
 }
 
 // free a proc structure and the data hanging from it,
@@ -255,47 +266,57 @@ growproc(int n)
 
 // Create a new process, copying the parent.
 // Sets up child kernel stack to return as if from fork() system call.
+// 以当前进程作为父进程，创建一个几乎相同的子进程，并让父子进程从 fork() 之后继续执行。
 int
 fork(void)
 {
   int i, pid;
   struct proc *np;
-  struct proc *p = myproc();
+  struct proc *p = myproc(); //取得当前正在运行的进程，也就是父进程。保存为即将创建的子进程控制块地址。
 
   // Allocate process.
+  //allocproc() 会：在进程表中找到一个 UNUSED 槽位；分配 PID；
+  //分配 trapframe；创建空页表；初始化内核上下文；返回时保持 np->lock 已加锁。
   if((np = allocproc()) == 0){
     return -1;
   }
 
   // Copy user memory from parent to child.
   if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
+    //如果复制失败，释放子进程已经申请的资源，并返回失败
     freeproc(np);
     release(&np->lock);
     return -1;
   }
   np->sz = p->sz;
 
-  np->parent = p;
+  np->parent = p;//这样以后以后父进程调用wait()时，内核就能通过这个关系找到自己的子进程
 
-  // copy saved user registers.
+  // copy saved user registers.把父进程保存的所有用户态寄存器，整体复制给子进程。
+  // *(p->trapframe)表示父进程的整个 trapframe 结构体对象。
   *(np->trapframe) = *(p->trapframe);
+  //复制以后，子进程恢复到用户态时，会从与父进程几乎相同的位置继续执行。
+  //这就是为什么父子进程都会从 fork() 后面继续运行。
 
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;
+  np->kama_syscall_trace = p->kama_syscall_trace; //子进程继承父进程的kama_syscall_trace属性
 
-  // increment reference counts on open file descriptors.
+  // increment reference counts on open file descriptors.复制打开的文件描述符
   for(i = 0; i < NOFILE; i++)
     if(p->ofile[i])
+      //filedup ： 增加底层 struct file 的引用计数，让父子进程共同引用同一个打开文件对象。
       np->ofile[i] = filedup(p->ofile[i]);
+  //idup() 同样不是复制整个目录，而是：增加对应 inode 的引用计数。
   np->cwd = idup(p->cwd);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
+  
+  np->state = RUNNABLE;//RUNNABLE表示子进程已经准备完成，可以被调度器选中运行
 
-  np->state = RUNNABLE;
-
-  release(&np->lock);
+  release(&np->lock);//这个锁是在 去进程表里找空槽位的时候加的
 
   return pid;
 }
@@ -691,5 +712,34 @@ procdump(void)
       state = "???";
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
+  }
+}
+
+
+// kernel/proc.c
+void
+kama_procnum(uint64 *dst)
+{
+  struct proc *p; //结构体指针p 指向某一个 struct proc 进程控制块
+
+  // 初始化进程计数
+  *dst = 0;
+
+  // 遍历整个进程表proc（在 kernel/proc.c 中定义的一个全局数组，是整个 xv6 的进程表）
+  //&proc[NPROC]表示数组最后一个元素之后的位置
+  for(p = proc; p < &proc[NPROC]; p++){
+
+    // 每个进程槽都有自己的锁。
+    // 读取 p->state 前先加锁，防止其他 CPU 同时修改该进程状态。
+    acquire(&p->lock);
+
+    // UNUSED 表示这个槽位尚未分配给任何进程。
+    // 只要不是 UNUSED，就说明这个槽位对应一个已存在的进程。
+    if(p->state != UNUSED){
+      (*dst)++;
+    }
+
+    // 当前进程槽检查完毕，释放锁
+    release(&p->lock);
   }
 }

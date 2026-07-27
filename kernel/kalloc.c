@@ -80,3 +80,25 @@ kalloc(void)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
 }
+
+
+// kernel/kalloc.c
+// 获取空闲内存 以页为单位
+void
+kama_freebytes(uint64 *dst) //*dst是调用者的info.freemem
+{
+  *dst = 0;
+
+  acquire(&kmem.lock);
+
+  //定义一个指向 struct run 结构体的指针 
+  //kmem.freelist指向空闲页链表的第一个节点
+  struct run *p = kmem.freelist; //表示让 p 从第一个空闲页开始遍历
+
+  while(p){
+    *dst += PGSIZE;
+    p = p->next;
+  }
+
+  release(&kmem.lock);
+}
