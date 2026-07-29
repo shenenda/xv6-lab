@@ -10,9 +10,9 @@ sub entry {
     my $name = shift;
     print ".global $name\n";
     print "${name}:\n";
-    print " li a7, SYS_${name}\n"; //把系统调用编号放入a7寄存器
-    print " ecall\n"; //在这里生成的这句汇编指令，让 CPU 从用户态陷入内核态
-    print " ret\n"; //用户函数的普通函数返回指令，等内核处理完并返回用户态
+    print " li a7, SYS_${name}\n"; # 把系统调用编号放入a7寄存器
+    print " ecall\n"; # 在这里生成的这句汇编指令，让 CPU 从用户态陷入内核态
+    print " ret\n"; # 用户函数的普通函数返回指令，等内核处理完并返回用户态
 }
 	
 entry("fork");
