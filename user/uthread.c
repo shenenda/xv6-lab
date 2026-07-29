@@ -2,7 +2,7 @@
 #include "kernel/stat.h"
 #include "user/user.h"
 
-/* Possible states of a thread: */
+/* 用户线程可能处于以下状态： */
 #define FREE        0x0
 #define RUNNING     0x1
 #define RUNNABLE    0x2
@@ -12,8 +12,8 @@
 
 
 struct thread {
-  char       stack[STACK_SIZE]; /* the thread's stack */
-  int        state;             /* FREE, RUNNING, RUNNABLE */
+  char       stack[STACK_SIZE]; /* 该线程独占的用户栈。 */
+  int        state;             /* 状态取 FREE、RUNNING 或 RUNNABLE。 */
 
 };
 struct thread all_thread[MAX_THREAD];
@@ -23,11 +23,9 @@ extern void thread_switch(uint64, uint64);
 void 
 thread_init(void)
 {
-  // main() is thread 0, which will make the first invocation to
-  // thread_schedule().  it needs a stack so that the first thread_switch() can
-  // save thread 0's state.  thread_schedule() won't run the main thread ever
-  // again, because its state is set to RUNNING, and thread_schedule() selects
-  // a RUNNABLE thread.
+  // main() 作为 0 号线程第一次调用 thread_schedule()。它也需要自己的栈空间，
+  // 以便首次 thread_switch() 保存上下文。0 号线程保持 RUNNING，而调度器只选择
+  // RUNNABLE 线程，因此完成第一次切换后不会再调度回 main。
   current_thread = &all_thread[0];
   current_thread->state = RUNNING;
 }
@@ -37,7 +35,7 @@ thread_schedule(void)
 {
   struct thread *t, *next_thread;
 
-  /* Find another runnable thread. */
+  /* 从当前线程的下一个表项开始循环查找可运行线程。 */
   next_thread = 0;
   t = current_thread + 1;
   for(int i = 0; i < MAX_THREAD; i++){
@@ -55,13 +53,12 @@ thread_schedule(void)
     exit(-1);
   }
 
-  if (current_thread != next_thread) {         /* switch threads?  */
+  if (current_thread != next_thread) {         /* 只有目标不同才需要切换上下文。 */
     next_thread->state = RUNNING;
     t = current_thread;
     current_thread = next_thread;
-    /* YOUR CODE HERE
-     * Invoke thread_switch to switch from t to next_thread:
-     * thread_switch(??, ??);
+    /* 在此补充代码：调用 thread_switch，把 t 的寄存器上下文保存到其线程结构中，
+     * 并从 next_thread 的线程结构恢复新上下文。传入的应是两份上下文存储区地址。
      */
   } else
     next_thread = 0;
@@ -72,16 +69,18 @@ thread_create(void (*func)())
 {
   struct thread *t;
 
+  // 指针在连续的线程表中前进，寻找可复用的 FREE 表项。
   for (t = all_thread; t < all_thread + MAX_THREAD; t++) {
     if (t->state == FREE) break;
   }
   t->state = RUNNABLE;
-  // YOUR CODE HERE
+  // 在此补充代码：初始化新线程栈顶和首次运行时的返回地址。
 }
 
 void 
 thread_yield(void)
 {
+  // 协作式调度：当前线程先标记为可运行，再主动选择下一个线程。
   current_thread->state = RUNNABLE;
   thread_schedule();
 }

@@ -1,4 +1,4 @@
-// Sleeping locks
+// 睡眠锁实现。
 
 #include "types.h"
 #include "riscv.h"
@@ -22,6 +22,7 @@ void
 acquiresleep(struct sleeplock *lk)
 {
   acquire(&lk->lk);
+  // 锁被占用时让进程睡眠，不像自旋锁那样持续消耗 CPU。
   while (lk->locked) {
     sleep(lk, &lk->lk);
   }
@@ -36,6 +37,7 @@ releasesleep(struct sleeplock *lk)
   acquire(&lk->lk);
   lk->locked = 0;
   lk->pid = 0;
+  // 以锁对象地址作为睡眠通道，唤醒所有等待者重新竞争。
   wakeup(lk);
   release(&lk->lk);
 }

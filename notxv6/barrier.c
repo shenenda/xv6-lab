@@ -10,8 +10,8 @@ static int round = 0;
 struct barrier {
   pthread_mutex_t barrier_mutex;
   pthread_cond_t barrier_cond;
-  int nthread;      // Number of threads that have reached this round of the barrier
-  int round;     // Barrier round
+  int nthread;      // 本轮已经到达屏障的线程数。
+  int round;     // 当前屏障轮次，用于区分连续两轮等待。
 } bstate;
 
 static void
@@ -25,11 +25,8 @@ barrier_init(void)
 static void 
 barrier()
 {
-  // YOUR CODE HERE
-  //
-  // Block until all threads have called barrier() and
-  // then increment bstate.round.
-  //
+  // 在此补充代码：持有 barrier_mutex 更新到达计数；最后一个线程推进 round 并广播，
+  // 其他线程必须用 while 检查轮次并在 barrier_cond 上等待，以处理虚假唤醒。
   
 }
 
@@ -41,7 +38,9 @@ thread(void *xa)
   int i;
 
   for (i = 0; i < 20000; i++) {
+    // 保存进入屏障前的轮次；返回时全局轮次必须恰好推进一次。
     int t = bstate.round;
+    // 每轮所有线程都应看到相同轮次，防止某线程越过屏障抢跑。
     assert (i == t);
     barrier();
     usleep(random() % 100);
@@ -69,6 +68,7 @@ main(int argc, char *argv[])
   barrier_init();
 
   for(i = 0; i < nthread; i++) {
+    // 线程编号通过 void* 传入；目标平台上再按 long 取回，避免直接解引用。
     assert(pthread_create(&tha[i], NULL, thread, (void *) i) == 0);
   }
   for(i = 0; i < nthread; i++) {

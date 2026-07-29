@@ -1,12 +1,13 @@
-# Context switch
+# 内核上下文切换
 #
 #   void swtch(struct context *old, struct context *new);
 # 
-# Save current registers in old. Load from new.	
+# 把当前被调用者保存寄存器写入 old，再从 new 恢复另一执行流的寄存器。
 
 
 .globl swtch
 swtch:
+        # a0 和 a1 分别指向旧、新 context；字段偏移必须与 proc.h 完全一致。
         sd ra, 0(a0)
         sd sp, 8(a0)
         sd s0, 16(a0)

@@ -40,17 +40,17 @@ void put(int key, int value)
 {
   int i = key % NBUCKET;
 
-  // is the key already present?
+  // 先遍历目标桶，判断键是否已经存在。
   struct entry *e = 0;
   for (e = table[i]; e != 0; e = e->next) {
     if (e->key == key)
       break;
   }
   if(e){
-    // update the existing key.
+    // 已存在时只更新值。
     e->value = value;
   } else {
-    // the new is new.
+    // 不存在时把新节点插入桶链表头部。
     insert(key, value, &table[i], table[i]);
   }
 }
@@ -72,7 +72,8 @@ get(int key)
 static void *
 put_thread(void *xa)
 {
-  int n = (int) (long) xa; // thread number
+  int n = (int) (long) xa; // 线程编号；pthread 参数通过 void* 携带整数。
+  // 每个写线程负责互不重叠的一段 keys，但不同键仍可能落入同一个桶。
   int b = NKEYS/nthread;
 
   for (int i = 0; i < b; i++) {
@@ -85,7 +86,7 @@ put_thread(void *xa)
 static void *
 get_thread(void *xa)
 {
-  int n = (int) (long) xa; // thread number
+  int n = (int) (long) xa; // 线程编号；pthread 参数通过 void* 携带整数。
   int missing = 0;
 
   for (int i = 0; i < NKEYS; i++) {
@@ -110,13 +111,14 @@ main(int argc, char *argv[])
   nthread = atoi(argv[1]);
   tha = malloc(sizeof(pthread_t) * nthread);
   srandom(0);
+  // 保证键数量能被线程数整除，避免分片末尾遗漏。
   assert(NKEYS % nthread == 0);
   for (int i = 0; i < NKEYS; i++) {
     keys[i] = random();
   }
 
   //
-  // first the puts
+  // 第一阶段：多个线程并发插入键值。
   //
   t0 = now();
   for(int i = 0; i < nthread; i++) {
@@ -131,7 +133,7 @@ main(int argc, char *argv[])
          NKEYS, t1 - t0, NKEYS / (t1 - t0));
 
   //
-  // now the gets
+  // 第二阶段：每个线程读取全部键并统计缺失项。
   //
   t0 = now();
   for(int i = 0; i < nthread; i++) {
