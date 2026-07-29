@@ -81,7 +81,7 @@ snprintf(char *buf, int sz, char *fmt, ...)
       off += sputc(buf+off, '%');
       break;
     default:
-      // Print unknown % sequence to draw attention.
+      // 原样输出未知的 % 序列，使格式串错误更容易被发现。
       off += sputc(buf+off, '%');
       off += sputc(buf+off, c);
       break;

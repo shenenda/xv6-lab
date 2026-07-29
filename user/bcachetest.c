@@ -20,6 +20,7 @@ main(int argc, char *argv[])
   exit(0);
 }
 
+// 创建文件并连续写入 nblock 个磁盘块，为缓存压力测试准备数据。
 void
 createfile(char *file, int nblock)
 {
@@ -41,6 +42,7 @@ createfile(char *file, int nblock)
   close(fd);
 }
 
+// 每次读取 inc 字节，直到累计读取 nbytes；不同步长会形成不同的缓存访问模式。
 void
 readfile(char *file, int nbytes, int inc)
 {
@@ -65,6 +67,7 @@ readfile(char *file, int nbytes, int inc)
   close(fd);
 }
 
+// 解析内核返回的锁统计结果，读取 tot= 后面的总竞争次数。
 int ntas(int print)
 {
   int n;
@@ -109,6 +112,7 @@ test0()
     }
   }
   m = ntas(0);
+  // 三个子进程读取各自目录中的文件；彼此访问不同块，用于检验缓存锁能否并行。
   for(int i = 0; i < NCHILD; i++){
     dir[0] = '0' + i;
     int pid = fork();
@@ -156,6 +160,7 @@ void test1()
       createfile(file, 1);
     }
   }
+  // 一个进程反复扫描大文件，另一个反复读取小文件，制造容量与热点竞争。
   for(int i = 0; i < NCHILD; i++){
     file[1] = '0' + i;
     int pid = fork();

@@ -22,6 +22,7 @@ main(int argc, char *argv[])
   exit(0);
 }
 
+// 从内核锁统计文本的 tot= 字段中提取总自旋次数。
 int ntas(int print)
 {
   int n;
@@ -43,6 +44,7 @@ void test1(void)
   int n, m;
   printf("start test1\n");  
   m = ntas(0);
+  // 多个子进程反复扩张、收缩地址空间，用于放大物理页分配器的锁竞争。
   for(int i = 0; i < NCHILD; i++){
     int pid = fork();
     if(pid < 0){
@@ -74,9 +76,7 @@ void test1(void)
     printf("test1 FAIL\n");
 }
 
-//
-// countfree() from usertests.c
-//
+// 该 countfree() 取自 usertests.c，通过持续扩张堆来统计可分配物理页。
 int
 countfree()
 {
@@ -88,10 +88,11 @@ countfree()
     if(a == 0xffffffffffffffff){
       break;
     }
-    // modify the memory to make sure it's really allocated.
+// 写入新页，确保它确实建立映射并分配了物理内存。
     *(char *)(a + 4096 - 1) = 1;
     n += 1;
   }
+  // 把测试期间扩张的堆全部缩回起点，避免统计过程永久占用内存。
   sbrk(-((uint64)sbrk(0) - sz0));
   return n;
 }
@@ -106,6 +107,7 @@ void test2() {
     printf("test2 FAILED: cannot allocate enough memory");
     exit(-1);
   }
+  // 重复统计可用页数，检查分配与释放过程中是否发生页泄漏。
   for (int i = 0; i < 50; i++) {
     free1 = countfree();
     if(i % 10 == 9)
