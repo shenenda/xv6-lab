@@ -33,6 +33,7 @@ statsread(int user_dst, uint64 dst, int n)
 
   acquire(&stats.lock);
 
+  // 缓冲区为空时才生成一次统计快照，后续读取通过 off 分段取走。
   if(stats.sz == 0) {
 #ifdef LAB_PGTBL
     stats.sz = statscopyin(stats.buf, BUFSZ);
@@ -46,10 +47,12 @@ statsread(int user_dst, uint64 dst, int n)
   if (m > 0) {
     if(m > n)
       m  = n;
+    // 设备读既可能面向用户地址，也可能面向内核地址，由 either_copyout 统一处理。
     if(either_copyout(user_dst, dst, stats.buf+stats.off, m) != -1) {
       stats.off += m;
     }
   } else {
+    // 当前快照读完后复位，下次读取会重新收集最新统计信息。
     m = -1;
     stats.sz = 0;
     stats.off = 0;
@@ -63,6 +66,7 @@ statsinit(void)
 {
   initlock(&stats.lock, "stats");
 
+  // 将统计接口注册成一个设备文件，沿用普通文件的 read/write 分发路径。
   devsw[STATS].read = statsread;
   devsw[STATS].write = statswrite;
 }
