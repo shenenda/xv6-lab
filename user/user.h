@@ -2,7 +2,7 @@ struct stat;
 struct rtcdate;
 struct sysinfo; //声明sysinfo结构体，使用户程序可以使用这个结构体
 
-// system calls
+// 系统调用。
 int fork(void);
 int exit(int) __attribute__((noreturn));
 int wait(int*);

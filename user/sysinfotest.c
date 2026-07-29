@@ -4,6 +4,7 @@
 #include "user/user.h"
 
 
+// 调用 sysinfo，并把系统调用失败统一转换成测试失败。
 void
 sinfo(struct sysinfo *info) {
   if (sysinfo(info) < 0) {
@@ -13,11 +14,12 @@ sinfo(struct sysinfo *info) {
 }
 
 //
-// use sbrk() to count how many free physical memory pages there are.
+// 用 sbrk() 耗尽可分配内存，从而统计空闲物理页总量。
 //
 int
 countfree()
 {
+  // 保存初始 break，测试结束时一次性收缩回该位置。
   uint64 sz0 = (uint64)sbrk(0);
   struct sysinfo info;
   int n = 0;
@@ -28,6 +30,7 @@ countfree()
     }
     n += PGSIZE;
   }
+  // sbrk 失败后应当没有完整物理页可供继续分配。
   sinfo(&info);
   if (info.freemem != 0) {
     printf("FAIL: there is no free mem, but sysinfo.freemem=%d\n",
@@ -38,6 +41,7 @@ countfree()
   return n;
 }
 
+// 验证分配和释放一页时 freemem 恰好按 PGSIZE 增减。
 void
 testmem() {
   struct sysinfo info;
@@ -75,6 +79,7 @@ testmem() {
   }
 }
 
+// 验证 sysinfo 的正常调用和非法用户指针检查。
 void
 testcall() {
   struct sysinfo info;
@@ -90,6 +95,7 @@ testcall() {
   }
 }
 
+// fork 前后读取 nproc，验证活动进程计数会随子进程创建和退出变化。
 void testproc() {
   struct sysinfo info;
   uint64 nproc;

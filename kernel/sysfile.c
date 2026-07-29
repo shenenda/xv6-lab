@@ -1,7 +1,6 @@
 //
-// File-system system calls.
-// Mostly argument checking, since we don't trust
-// user code, and calls into file.c and fs.c.
+// 文件系统相关系统调用。用户参数不可信，因此这里主要负责参数检查，
+// 再调用 file.c 和 fs.c 中的底层实现。
 //
 
 #include "types.h"
@@ -16,8 +15,7 @@
 #include "file.h"
 #include "fcntl.h"
 
-// Fetch the nth word-sized system call argument as a file descriptor
-// and return both the descriptor and the corresponding struct file.
+// 把第 n 个机器字宽参数解释为文件描述符，同时返回描述符编号及对应的 file 结构。
 static int
 argfd(int n, int *pfd, struct file **pf)
 {
@@ -35,8 +33,7 @@ argfd(int n, int *pfd, struct file **pf)
   return 0;
 }
 
-// Allocate a file descriptor for the given file.
-// Takes over file reference from caller on success.
+// 为给定 file 分配进程文件描述符；成功后接管调用者持有的 file 引用。
 static int
 fdalloc(struct file *f)
 {
@@ -108,14 +105,14 @@ uint64
 sys_fstat(void)
 {
   struct file *f;
-  uint64 st; // user pointer to struct stat
+  uint64 st; // 指向用户空间 struct stat 的指针。
 
   if(argfd(0, 0, &f) < 0 || argaddr(1, &st) < 0)
     return -1;
   return filestat(f, st);
 }
 
-// Create the path new as a link to the same inode as old.
+// 创建路径 new，使它与 old 指向同一个 inode。
 uint64
 sys_link(void)
 {
@@ -165,7 +162,7 @@ bad:
   return -1;
 }
 
-// Is the directory dp empty except for "." and ".." ?
+// 判断目录 dp 除 "." 和 ".." 外是否为空。
 static int
 isdirempty(struct inode *dp)
 {
@@ -200,7 +197,7 @@ sys_unlink(void)
 
   ilock(dp);
 
-  // Cannot unlink "." or "..".
+  // 不允许删除当前目录项 "." 或父目录项 ".."。
   if(namecmp(name, ".") == 0 || namecmp(name, "..") == 0)
     goto bad;
 
@@ -267,10 +264,10 @@ create(char *path, short type, short major, short minor)
   ip->nlink = 1;
   iupdate(ip);
 
-  if(type == T_DIR){  // Create . and .. entries.
-    dp->nlink++;  // for ".."
+  if(type == T_DIR){  // 创建 "." 和 ".." 目录项。
+    dp->nlink++;  // ".." 会增加父目录的链接计数。
     iupdate(dp);
-    // No ip->nlink++ for ".": avoid cyclic ref count.
+    // 不因 "." 增加 ip->nlink，避免形成自引用计数。
     if(dirlink(ip, ".", ip->inum) < 0 || dirlink(ip, "..", dp->inum) < 0)
       panic("create dots");
   }
@@ -457,7 +454,7 @@ sys_exec(void)
 uint64
 sys_pipe(void)
 {
-  uint64 fdarray; // user pointer to array of two integers
+  uint64 fdarray; // 指向用户空间两个整数数组的指针。
   struct file *rf, *wf;
   int fd0, fd1;
   struct proc *p = myproc();

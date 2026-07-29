@@ -1,4 +1,4 @@
 struct sysinfo {
-  uint64 freemem;   // 空闲内存属性amount of free memory (bytes)
-  uint64 nproc;     // 进程数量属性number of process
+  uint64 freemem;   // 当前空闲物理内存字节数。
+  uint64 nproc;     // 当前非 UNUSED 状态的进程数量。
 };

@@ -373,4 +373,4 @@ sfence_vma()
 #define MAXVA (1L << (9 + 9 + 9 + 12 - 1))
 
 typedef uint64 pte_t;
-typedef uint64 *pagetable_t; // 512 PTEs
+typedef uint64 *pagetable_t; // 512 PTEs 实际上是一个指向RISC-V根页表的指针
