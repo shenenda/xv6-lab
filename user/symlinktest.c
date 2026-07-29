@@ -25,6 +25,7 @@ main(int argc, char *argv[])
   exit(failed);
 }
 
+// 清理上一次运行遗留的目录、普通文件和符号链接。
 static void
 cleanup(void)
 {
@@ -40,7 +41,7 @@ cleanup(void)
   unlink("/testsymlink");
 }
 
-// stat a symbolic link using O_NOFOLLOW
+// 使用 O_NOFOLLOW 打开符号链接本身，再通过 fstat 检查链接 inode。
 static int
 stat_slink(char *pn, struct stat *st)
 {
@@ -52,6 +53,7 @@ stat_slink(char *pn, struct stat *st)
   return 0;
 }
 
+// 验证链接跟随、悬空链接、循环检测以及多级链接解析。
 static void
 testsymlink(void)
 {
@@ -90,6 +92,7 @@ testsymlink(void)
   if(open("/testsymlink/b", O_RDWR) >= 0)
     fail("Should not be able to open b after deleting a");
 
+  // 此时 b 指向已删除的 a；再让 a 指向 b，构造 a 与 b 的解析环。
   r = symlink("/testsymlink/b", "/testsymlink/a");
   if(r < 0)
     fail("symlink a -> b failed");
@@ -102,6 +105,7 @@ testsymlink(void)
   if(r != 0)
     fail("Symlinking to nonexistent file should succeed\n");
 
+  // 构造 1 -> 2 -> 3 -> 4 的链接链，检查递归解析是否到达最终文件。
   r = symlink("/testsymlink/2", "/testsymlink/1");
   if(r) fail("Failed to link 1->2");
   r = symlink("/testsymlink/3", "/testsymlink/2");
@@ -131,6 +135,7 @@ done:
   close(fd2);
 }
 
+// 多进程并发创建、查询和删除同一路径，检查目录与 inode 操作的同步。
 static void
 concur(void)
 {

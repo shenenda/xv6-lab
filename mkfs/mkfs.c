@@ -5,7 +5,7 @@
 #include <fcntl.h>
 #include <assert.h>
 
-#define stat xv6_stat  // avoid clash with host struct stat
+#define stat xv6_stat  // 避免与宿主机的 struct stat 冲突
 #include "kernel/types.h"
 #include "kernel/fs.h"
 #include "kernel/stat.h"
@@ -17,14 +17,14 @@
 
 #define NINODES 200
 
-// Disk layout:
-// [ boot block | sb block | log | inode blocks | free bit map | data blocks ]
+// 磁盘布局：
+// [ 引导块 | 超级块 | 日志 | inode 块 | 空闲位图 | 数据块 ]
 
 int nbitmap = FSSIZE/(BSIZE*8) + 1;
 int ninodeblocks = NINODES / IPB + 1;
 int nlog = LOGSIZE;
-int nmeta;    // Number of meta blocks (boot, sb, nlog, inode, bitmap)
-int nblocks;  // Number of data blocks
+int nmeta;    // 元数据块总数（引导块、超级块、日志、inode 和位图）
+int nblocks;  // 数据块数量
 
 int fsfd;
 struct superblock sb;
@@ -41,7 +41,7 @@ void rsect(uint sec, void *buf);
 uint ialloc(ushort type);
 void iappend(uint inum, void *p, int n);
 
-// convert to intel byte order
+// 转换为小端字节序，保证生成的镜像格式与目标系统一致
 ushort
 xshort(ushort x)
 {
@@ -90,7 +90,7 @@ main(int argc, char *argv[])
     exit(1);
   }
 
-  // 1 fs block = 1 disk sector
+  // 这里一个文件系统块对应一个磁盘扇区
   nmeta = 2 + nlog + ninodeblocks + nbitmap;
   nblocks = FSSIZE - nmeta;
 
@@ -106,7 +106,7 @@ main(int argc, char *argv[])
   printf("nmeta %d (boot, super, log blocks %u inode blocks %u, bitmap blocks %u) blocks %d total %d\n",
          nmeta, nlog, ninodeblocks, nbitmap, nblocks, FSSIZE);
 
-  freeblock = nmeta;     // the first free block that we can allocate
+  freeblock = nmeta;     // 第一个可以分配的数据块
 
   for(i = 0; i < FSSIZE; i++)
     wsect(i, zeroes);
@@ -129,7 +129,7 @@ main(int argc, char *argv[])
   iappend(rootino, &de, sizeof(de));
 
   for(i = 2; i < argc; i++){
-    // get rid of "user/"
+    // 去掉路径开头的 "user/"
     char *shortname;
     if(strncmp(argv[i], "user/", 5) == 0)
       shortname = argv[i] + 5;
@@ -143,10 +143,10 @@ main(int argc, char *argv[])
       exit(1);
     }
 
-    // Skip leading _ in name when writing to file system.
-    // The binaries are named _rm, _cat, etc. to keep the
-    // build operating system from trying to execute them
-    // in place of system binaries like rm and cat.
+    // 写入文件系统镜像时去掉文件名前导的下划线。
+    // 构建产物命名为 _rm、_cat 等，是为了防止宿主操作系统
+    // 在构建期间误把这些 RISC-V 程序当作宿主机程序执行，
+    // 从而覆盖 rm、cat 等同名系统命令。
     if(shortname[0] == '_')
       shortname += 1;
 
@@ -163,7 +163,7 @@ main(int argc, char *argv[])
     close(fd);
   }
 
-  // fix size of root inode dir
+  // 把根目录 inode 的大小向上补齐到完整磁盘块
   rinode(rootino, &din);
   off = xint(din.size);
   off = ((off/BSIZE) + 1) * BSIZE;

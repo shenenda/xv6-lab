@@ -4,6 +4,7 @@
 #include "kernel/fcntl.h"
 #include "kernel/fs.h"
 
+// 写满并重新读取一个跨越直接块、间接块以及双重间接块范围的大文件。
 int
 main()
 {
@@ -17,6 +18,7 @@ main()
   }
 
   blocks = 0;
+  // 每个块开头写入自身序号，写到文件系统拒绝继续扩展为止。
   while(1){
     *(int*)buf = blocks;
     int cc = write(fd, buf, sizeof(buf));
@@ -39,6 +41,7 @@ main()
     printf("bigfile: cannot re-open big.file for reading\n");
     exit(-1);
   }
+  // 逐块读回并核对序号，验证各级间接索引都指向正确的数据块。
   for(i = 0; i < blocks; i++){
     int cc = read(fd, buf, sizeof(buf));
     if(cc <= 0){
