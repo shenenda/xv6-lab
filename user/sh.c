@@ -1,10 +1,10 @@
-// Shell.
+// 简易命令行 shell。
 
 #include "kernel/types.h"
 #include "user/user.h"
 #include "kernel/fcntl.h"
 
-// Parsed command representation
+// 解析后的命令树节点类型；所有具体节点都把 type 放在首字段，便于统一转型。
 #define EXEC  1
 #define REDIR 2
 #define PIPE  3
@@ -49,11 +49,11 @@ struct backcmd {
   struct cmd *cmd;
 };
 
-int fork1(void);  // Fork but panics on failure.
+int fork1(void);  // fork 失败时直接终止 shell。
 void panic(char*);
 struct cmd *parsecmd(char*);
 
-// Execute cmd.  Never returns.
+// 递归执行命令树；各分支最终通过 exec、递归调用或 exit 结束，不会返回。
 void
 runcmd(struct cmd *cmd)
 {
@@ -67,6 +67,7 @@ runcmd(struct cmd *cmd)
   if(cmd == 0)
     exit(1);
 
+  // 根据公共首字段 type 把基类指针还原为具体命令节点。
   switch(cmd->type){
   default:
     panic("runcmd");
@@ -81,6 +82,7 @@ runcmd(struct cmd *cmd)
 
   case REDIR:
     rcmd = (struct redircmd*)cmd;
+    // 先关闭目标描述符，再 open；open 会取得当前最小空闲描述符，实现重定向。
     close(rcmd->fd);
     if(open(rcmd->file, rcmd->mode) < 0){
       fprintf(2, "open %s failed\n", rcmd->file);
@@ -91,6 +93,7 @@ runcmd(struct cmd *cmd)
 
   case LIST:
     lcmd = (struct listcmd*)cmd;
+    // 左命令在子进程运行；父进程等待它结束后直接执行右命令。
     if(fork1() == 0)
       runcmd(lcmd->left);
     wait(0);
@@ -102,6 +105,7 @@ runcmd(struct cmd *cmd)
     if(pipe(p) < 0)
       panic("pipe");
     if(fork1() == 0){
+      // 左侧命令把标准输出替换为管道写端。
       close(1);
       dup(p[1]);
       close(p[0]);
@@ -109,12 +113,14 @@ runcmd(struct cmd *cmd)
       runcmd(pcmd->left);
     }
     if(fork1() == 0){
+      // 右侧命令把标准输入替换为管道读端。
       close(0);
       dup(p[0]);
       close(p[0]);
       close(p[1]);
       runcmd(pcmd->right);
     }
+    // 父进程也必须关闭两端，否则残留的写端会让读者永远等不到 EOF。
     close(p[0]);
     close(p[1]);
     wait(0);
@@ -136,7 +142,7 @@ getcmd(char *buf, int nbuf)
   fprintf(2, "$ ");
   memset(buf, 0, nbuf);
   gets(buf, nbuf);
-  if(buf[0] == 0) // EOF
+  if(buf[0] == 0) // 读到文件末尾
     return -1;
   return 0;
 }
@@ -147,7 +153,7 @@ main(void)
   static char buf[100];
   int fd;
 
-  // Ensure that three file descriptors are open.
+  // 确保标准输入、标准输出和标准错误三个文件描述符都已连接到控制台。
   while((fd = open("console", O_RDWR)) >= 0){
     if(fd >= 3){
       close(fd);
@@ -155,11 +161,11 @@ main(void)
     }
   }
 
-  // Read and run input commands.
+  // 循环读取并执行命令。
   while(getcmd(buf, sizeof(buf)) >= 0){
     if(buf[0] == 'c' && buf[1] == 'd' && buf[2] == ' '){
-      // Chdir must be called by the parent, not the child.
-      buf[strlen(buf)-1] = 0;  // chop \n
+      // chdir 必须由 shell 父进程执行，否则子进程退出后目录变化会丢失。
+      buf[strlen(buf)-1] = 0;  // 去掉命令末尾的换行符
       if(chdir(buf+3) < 0)
         fprintf(2, "cannot cd %s\n", buf+3);
       continue;
@@ -190,7 +196,7 @@ fork1(void)
 }
 
 //PAGEBREAK!
-// Constructors
+// 命令树节点构造函数。
 
 struct cmd*
 execcmd(void)
@@ -257,7 +263,7 @@ backcmd(struct cmd *subcmd)
   return (struct cmd*)cmd;
 }
 //PAGEBREAK!
-// Parsing
+// 词法分析与递归下降解析。
 
 char whitespace[] = " \t\r\n\v";
 char symbols[] = "<|>&;()";
@@ -269,6 +275,7 @@ gettoken(char **ps, char *es, char **q, char **eq)
   int ret;
 
   s = *ps;
+  // q/eq 记录 token 在原输入缓冲区中的半开区间，暂时不复制字符串。
   while(s < es && strchr(whitespace, *s))
     s++;
   if(q)
@@ -288,6 +295,7 @@ gettoken(char **ps, char *es, char **q, char **eq)
   case '>':
     s++;
     if(*s == '>'){
+      // 用内部 token '+' 区分追加重定向 >> 与覆盖重定向 >。
       ret = '+';
       s++;
     }
@@ -332,6 +340,7 @@ parsecmd(char *s)
 
   es = s + strlen(s);
   cmd = parseline(&s, es);
+  // 空 token 集合只用于跳过末尾空白，再检查是否仍有未解析输入。
   peek(&s, es, "");
   if(s != es){
     fprintf(2, "leftovers: %s\n", s);
@@ -346,6 +355,7 @@ parseline(char **ps, char *es)
 {
   struct cmd *cmd;
 
+  // 解析优先级由调用层次决定：执行/重定向高于管道，管道高于后台与分号列表。
   cmd = parsepipe(ps, es);
   while(peek(ps, es, "&")){
     gettoken(ps, es, 0, 0);
@@ -364,6 +374,7 @@ parsepipe(char **ps, char *es)
   struct cmd *cmd;
 
   cmd = parseexec(ps, es);
+  // 右递归使一串管道构造成 left | (right | ...) 的命令树。
   if(peek(ps, es, "|")){
     gettoken(ps, es, 0, 0);
     cmd = pipecmd(cmd, parsepipe(ps, es));
@@ -388,7 +399,7 @@ parseredirs(struct cmd *cmd, char **ps, char *es)
     case '>':
       cmd = redircmd(cmd, q, eq, O_WRONLY|O_CREATE|O_TRUNC, 1);
       break;
-    case '+':  // >>
+    case '+':  // 追加重定向 >>
       cmd = redircmd(cmd, q, eq, O_WRONLY|O_CREATE, 1);
       break;
     }
@@ -425,6 +436,7 @@ parseexec(char **ps, char *es)
 
   ret = execcmd();
   cmd = (struct execcmd*)ret;
+  // argv 指向原输入中的 token 起点，eargv 保存 token 末端，最后统一补 NUL。
 
   argc = 0;
   ret = parseredirs(ret, ps, es);
@@ -445,7 +457,7 @@ parseexec(char **ps, char *es)
   return ret;
 }
 
-// NUL-terminate all the counted strings.
+// 递归遍历命令树，在先前记录的 token 末端写入 NUL，使其成为普通 C 字符串。
 struct cmd*
 nulterminate(struct cmd *cmd)
 {

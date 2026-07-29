@@ -1,4 +1,4 @@
-// Simple grep.  Only supports ^ . * $ operators.
+// 简化版 grep，只支持 ^、.、*、$ 四种正则运算符。
 
 #include "kernel/types.h"
 #include "kernel/stat.h"
@@ -14,6 +14,7 @@ grep(char *pattern, int fd)
   char *p, *q;
 
   m = 0;
+  // 每次保留上轮最后一个不完整行，再把新读取的数据拼到其后。
   while((n = read(fd, buf+m, sizeof(buf)-m-1)) > 0){
     m += n;
     buf[m] = '\0';
@@ -61,8 +62,7 @@ main(int argc, char *argv[])
   exit(0);
 }
 
-// Regexp matcher from Kernighan & Pike,
-// The Practice of Programming, Chapter 9.
+// 正则匹配器取自 Kernighan 与 Pike 的《The Practice of Programming》第 9 章。
 
 int matchhere(char*, char*);
 int matchstar(int, char*, char*);
@@ -72,18 +72,19 @@ match(char *re, char *text)
 {
   if(re[0] == '^')
     return matchhere(re+1, text);
-  do{  // must look at empty string
+  do{  // 还要尝试字符串末尾的空串，以支持 $ 等零长度匹配
     if(matchhere(re, text))
       return 1;
   }while(*text++ != '\0');
   return 0;
 }
 
-// matchhere: search for re at beginning of text
+// matchhere：只判断正则 re 能否从 text 的当前位置开始匹配。
 int matchhere(char *re, char *text)
 {
   if(re[0] == '\0')
     return 1;
+  // 星号作用于前一个字符；把星号后的正则交给 matchstar 反复尝试。
   if(re[1] == '*')
     return matchstar(re[0], re+2, text);
   if(re[0] == '$' && re[1] == '\0')
@@ -93,10 +94,10 @@ int matchhere(char *re, char *text)
   return 0;
 }
 
-// matchstar: search for c*re at beginning of text
+// matchstar：尝试让 c* 消耗不同数量的字符，再匹配剩余正则 re。
 int matchstar(int c, char *re, char *text)
 {
-  do{  // a * matches zero or more instances
+  do{  // 先尝试零次，再逐步尝试一次或多次，体现 * 的“零个或多个”语义
     if(matchhere(re, text))
       return 1;
   }while(*text!='\0' && (*text++==c || c=='.'));

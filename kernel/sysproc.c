@@ -14,7 +14,7 @@ sys_exit(void)
   if(argint(0, &n) < 0)
     return -1;
   exit(n);
-  return 0;  // not reached
+  return 0;  // exit 不会返回到这里。
 }
 
 uint64
@@ -60,6 +60,7 @@ sys_sleep(void)
 
   if(argint(0, &n) < 0)
     return -1;
+  // ticks 会在时钟中断中并发更新，读取和等待都必须由 tickslock 保护。
   acquire(&tickslock);
   ticks0 = ticks;
   while(ticks - ticks0 < n){
@@ -67,6 +68,7 @@ sys_sleep(void)
       release(&tickslock);
       return -1;
     }
+    // sleep 会原子地释放 tickslock，唤醒后重新持有它，避免错过时钟唤醒。
     sleep(&ticks, &tickslock);
   }
   release(&tickslock);
@@ -83,8 +85,7 @@ sys_kill(void)
   return kill(pid);
 }
 
-// return how many clock tick interrupts have occurred
-// since start.
+// 返回系统启动以来已经发生的时钟中断次数。
 uint64
 sys_uptime(void)
 {
