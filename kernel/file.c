@@ -1,5 +1,5 @@
 //
-// Support functions for system calls that involve file descriptors.
+// 为涉及文件描述符的系统调用提供通用 file 层支持。
 //
 
 #include "types.h"
@@ -25,7 +25,7 @@ fileinit(void)
   initlock(&ftable.lock, "ftable");
 }
 
-// Allocate a file structure.
+// 从全局文件表中分配一个 file 结构。
 struct file*
 filealloc(void)
 {
@@ -43,7 +43,7 @@ filealloc(void)
   return 0;
 }
 
-// Increment ref count for file f.
+// 增加文件 f 的引用计数。
 struct file*
 filedup(struct file *f)
 {
@@ -55,7 +55,7 @@ filedup(struct file *f)
   return f;
 }
 
-// Close file f.  (Decrement ref count, close when reaches 0.)
+// 关闭文件 f：先减少引用计数，减到 0 时再释放底层资源。
 void
 fileclose(struct file *f)
 {
@@ -82,8 +82,7 @@ fileclose(struct file *f)
   }
 }
 
-// Get metadata about file f.
-// addr is a user virtual address, pointing to a struct stat.
+// 获取文件 f 的元数据；addr 是指向 struct stat 的用户虚拟地址。
 int
 filestat(struct file *f, uint64 addr)
 {
@@ -101,8 +100,7 @@ filestat(struct file *f, uint64 addr)
   return -1;
 }
 
-// Read from file f.
-// addr is a user virtual address.
+// 从文件 f 读取数据；addr 是用户虚拟地址。
 int
 fileread(struct file *f, uint64 addr, int n)
 {
@@ -129,8 +127,7 @@ fileread(struct file *f, uint64 addr, int n)
   return r;
 }
 
-// Write to file f.
-// addr is a user virtual address.
+// 向文件 f 写入数据；addr 是用户虚拟地址。
 int
 filewrite(struct file *f, uint64 addr, int n)
 {
@@ -146,12 +143,10 @@ filewrite(struct file *f, uint64 addr, int n)
       return -1;
     ret = devsw[f->major].write(1, addr, n);
   } else if(f->type == FD_INODE){
-    // write a few blocks at a time to avoid exceeding
-    // the maximum log transaction size, including
-    // i-node, indirect block, allocation blocks,
-    // and 2 blocks of slop for non-aligned writes.
-    // this really belongs lower down, since writei()
-    // might be writing a device like the console.
+    // 每次只写少量块，避免超过单个日志事务容量；预算中要包含 inode、间接块、
+    // 数据块分配以及非对齐写入预留的两个块。该分段逻辑更适合放在更低层，
+    // 因为 writei() 也可能写控制台之类的设备。
+    // 扣除 inode、间接块和预留块后，每个数据块还可能对应一个位图日志块，因此除以 2。
     int max = ((MAXOPBLOCKS-1-1-2) / 2) * BSIZE;
     int i = 0;
     while(i < n){
@@ -167,7 +162,7 @@ filewrite(struct file *f, uint64 addr, int n)
       end_op();
 
       if(r != n1){
-        // error from writei
+        // writei 未能完成本次分段写入，终止后续事务。
         break;
       }
       i += r;

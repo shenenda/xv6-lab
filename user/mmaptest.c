@@ -30,9 +30,7 @@ err(char *why)
   exit(1);
 }
 
-//
-// check the content of the two mapped pages.
-//
+// 检查两页映射内容：文件内的 1.5 页应为 A，超出文件末尾的半页应补零。
 void
 _v1(char *p)
 {
@@ -52,10 +50,7 @@ _v1(char *p)
   }
 }
 
-//
-// create a file to be mapped, containing
-// 1.5 pages of 'A' and half a page of zeros.
-//
+// 创建待映射文件：实际写入 1.5 页 A，映射到两页后剩余半页应按零填充。
 void
 makefile(const char *f)
 {
@@ -67,7 +62,7 @@ makefile(const char *f)
   if (fd == -1)
     err("open");
   memset(buf, 'A', BSIZE);
-  // write 1.5 page
+  // 按磁盘块写入一页半数据
   for (i = 0; i < n + n/2; i++) {
     if (write(fd, buf, BSIZE) != BSIZE)
       err("write 0 makefile");
@@ -85,31 +80,16 @@ mmap_test(void)
   printf("mmap_test starting\n");
   testname = "mmap_test";
 
-  //
-  // create a file with known content, map it into memory, check that
-  // the mapped memory has the same bytes as originally written to the
-  // file.
-  //
+  // 创建内容已知的文件并映射到内存，检查映射字节与原始文件一致。
   makefile(f);
   if ((fd = open(f, O_RDONLY)) == -1)
     err("open");
 
   printf("test mmap f\n");
-  //
-  // this call to mmap() asks the kernel to map the content
-  // of open file fd into the address space. the first
-  // 0 argument indicates that the kernel should choose the
-  // virtual address. the second argument indicates how many
-  // bytes to map. the third argument indicates that the
-  // mapped memory should be read-only. the fourth argument
-  // indicates that, if the process modifies the mapped memory,
-  // that the modifications should not be written back to
-  // the file nor shared with other processes mapping the
-  // same file (of course in this case updates are prohibited
-  // due to PROT_READ). the fifth argument is the file descriptor
-  // of the file to be mapped. the last argument is the starting
-  // offset in the file.
-  //
+  // mmap(0, length, prot, flags, fd, offset) 请求内核把 fd 对应文件从 offset
+  // 开始的 length 字节映射进当前地址空间。首参数为 0，表示虚拟地址由内核选择；
+  // PROT_READ 只允许读取；MAP_PRIVATE 表示修改不会写回文件，也不会被其他映射
+  // 同一文件的进程看到（本例本身只读，因此不能实际修改）。
   char *p = mmap(0, PGSIZE*2, PROT_READ, MAP_PRIVATE, fd, 0);
   if (p == MAP_FAILED)
     err("mmap (1)");
@@ -120,8 +100,7 @@ mmap_test(void)
   printf("test mmap f: OK\n");
     
   printf("test mmap private\n");
-  // should be able to map file opened read-only with private writable
-  // mapping
+  // 私有可写映射采用写时私有语义，因此允许映射一个只读打开的文件。
   p = mmap(0, PGSIZE*2, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
   if (p == MAP_FAILED)
     err("mmap (2)");
@@ -137,8 +116,7 @@ mmap_test(void)
     
   printf("test mmap read-only\n");
     
-  // check that mmap doesn't allow read/write mapping of a
-  // file opened read-only.
+  // 共享可写映射可能回写文件，所以不能基于只读文件描述符创建。
   if ((fd = open(f, O_RDONLY)) == -1)
     err("open");
   p = mmap(0, PGSIZE*3, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
@@ -151,8 +129,7 @@ mmap_test(void)
     
   printf("test mmap read/write\n");
   
-  // check that mmap does allow read/write mapping of a
-  // file opened read/write.
+  // 文件以读写方式打开后，应允许建立共享可读写映射。
   if ((fd = open(f, O_RDWR)) == -1)
     err("open");
   p = mmap(0, PGSIZE*3, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
@@ -161,14 +138,14 @@ mmap_test(void)
   if (close(fd) == -1)
     err("close");
 
-  // check that the mapping still works after close(fd).
+  // close(fd) 后映射仍须有效，因为内核应为映射单独持有文件引用。
   _v1(p);
 
-  // write the mapped memory.
+  // 修改共享映射，产生需要在解除映射时回写的脏页。
   for (i = 0; i < PGSIZE*2; i++)
     p[i] = 'Z';
 
-  // unmap just the first two of three pages of mapped memory.
+  // 只解除三页映射中的前两页，验证部分 munmap。
   if (munmap(p, PGSIZE*2) == -1)
     err("munmap (3)");
   
@@ -176,8 +153,7 @@ mmap_test(void)
   
   printf("test mmap dirty\n");
   
-  // check that the writes to the mapped memory were
-  // written to the file.
+  // 重新读取文件，检查共享映射中的修改是否已经写回。
   if ((fd = open(f, O_RDWR)) == -1)
     err("open");
   for (i = 0; i < PGSIZE + (PGSIZE/2); i++){
@@ -194,7 +170,7 @@ mmap_test(void)
 
   printf("test not-mapped unmap\n");
   
-  // unmap the rest of the mapped memory.
+  // 解除先前保留下来的最后一页映射。
   if (munmap(p+PGSIZE*2, PGSIZE) == -1)
     err("munmap (4)");
 
@@ -202,9 +178,7 @@ mmap_test(void)
     
   printf("test mmap two files\n");
   
-  //
-  // mmap two files at the same time.
-  //
+  // 同时映射两个文件，验证不同映射区域及其文件引用互不干扰。
   int fd1;
   if((fd1 = open("mmap1", O_RDWR|O_CREATE)) < 0)
     err("open mmap1");
@@ -242,10 +216,8 @@ mmap_test(void)
   printf("mmap_test: ALL OK\n");
 }
 
-//
-// mmap a file, then fork.
-// check that the child sees the mapped file.
-//
+// 映射文件后再 fork，检查子进程是否继承映射，且父子进程各自解除映射
+// 不会破坏另一进程仍在使用的映射。
 void
 fork_test(void)
 {
@@ -256,7 +228,7 @@ fork_test(void)
   printf("fork_test starting\n");
   testname = "fork_test";
   
-  // mmap the file twice.
+  // 把同一文件映射两次，检查两份 VMA 能独立维护。
   makefile(f);
   if ((fd = open(f, O_RDONLY)) == -1)
     err("open");
@@ -268,7 +240,7 @@ fork_test(void)
   if (p2 == MAP_FAILED)
     err("mmap (5)");
 
-  // read just 2nd page.
+  // 只访问第二页，用来验证按页延迟装入而非一次性读入整个区域。
   if(*(p1+PGSIZE) != 'A')
     err("fork mismatch (1)");
 
@@ -276,8 +248,8 @@ fork_test(void)
     err("fork");
   if (pid == 0) {
     _v1(p1);
-    munmap(p1, PGSIZE); // just the first page
-    exit(0); // tell the parent that the mapping looks OK.
+    munmap(p1, PGSIZE); // 子进程只解除第一份映射的第一页
+    exit(0); // 用退出状态通知父进程：子进程继承的映射工作正常
   }
 
   int status = -1;
@@ -288,7 +260,7 @@ fork_test(void)
     exit(1);
   }
 
-  // check that the parent's mappings are still there.
+  // 子进程退出并解除部分映射后，父进程的两份映射仍应完整有效。
   _v1(p1);
   _v1(p2);
 
