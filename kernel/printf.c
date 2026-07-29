@@ -1,5 +1,5 @@
 //
-// formatted console output -- printf, panic.
+// 控制台格式化输出：printf 与 panic。
 //
 
 #include <stdarg.h>
@@ -17,7 +17,7 @@
 
 volatile int panicked = 0;
 
-// lock to avoid interleaving concurrent printf's.
+// 用锁避免多个 CPU 的 printf 输出相互穿插。
 static struct {
   struct spinlock lock;
   int locking;
@@ -59,7 +59,7 @@ printptr(uint64 x)
     consputc(digits[x >> (sizeof(uint64) * 8 - 4)]);
 }
 
-// Print to the console. only understands %d, %x, %p, %s.
+// 向控制台输出格式化字符串，只支持 %d、%x、%p 和 %s。
 void
 printf(char *fmt, ...)
 {
@@ -69,7 +69,8 @@ printf(char *fmt, ...)
 
   locking = pr.locking;
   if(locking)
-    acquire(&pr.lock);
+    // 格式串解析与逐字符输出作为一个临界区，保证整条消息连续。
+  acquire(&pr.lock);
 
   if (fmt == 0)
     panic("null fmt");
@@ -103,7 +104,7 @@ printf(char *fmt, ...)
       consputc('%');
       break;
     default:
-      // Print unknown % sequence to draw attention.
+      // 未知格式符原样输出 '%' 和后续字符，便于发现格式错误。
       consputc('%');
       consputc(c);
       break;
@@ -121,7 +122,7 @@ panic(char *s)
   printf("panic: ");
   printf(s);
   printf("\n");
-  panicked = 1; // freeze uart output from other CPUs
+  panicked = 1; // 冻结其他 CPU 的 UART 输出，避免 panic 信息被打乱。
   for(;;)
     ;
 }

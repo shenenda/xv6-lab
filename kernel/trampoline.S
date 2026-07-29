@@ -1,12 +1,10 @@
 	#
-        # code to switch between user and kernel space.
+        # 在用户态与内核态之间切换的代码。
         #
-        # this code is mapped at the same virtual address
-        # (TRAMPOLINE) in user and kernel space so that
-        # it continues to work when it switches page tables.
+        # 这段代码在用户页表和内核页表中都映射到同一虚拟地址 TRAMPOLINE，
+        # 因而切换页表前后可以连续执行。
 	#
-	# kernel.ld causes this to be aligned
-        # to a page boundary.
+	# kernel.ld 保证本段起始地址按页对齐。
         #
 	.section trampsec
 .globl trampoline
@@ -15,20 +13,16 @@ trampoline:
 .globl uservec
 uservec:    
 	#
-        # trap.c sets stvec to point here, so
-        # traps from user space start here,
-        # in supervisor mode, but with a
-        # user page table.
+        # trap.c 让 stvec 指向这里，因此用户态陷阱会从 uservec 开始；
+        # 此时已进入监管者模式，但仍使用用户页表。
         #
-        # sscratch points to where the process's p->trapframe is
-        # mapped into user space, at TRAPFRAME.
+        # sscratch 保存 trapframe 在用户地址空间中的固定映射地址 TRAPFRAME。
         #
         
-	# swap a0 and sscratch
-        # so that a0 is TRAPFRAME
+	# 交换 a0 与 sscratch，使 a0 得到 TRAPFRAME，同时暂存原用户 a0。
         csrrw a0, sscratch, a0
 
-        # save the user registers in TRAPFRAME
+        # 把用户寄存器依照 trapframe 字段偏移保存到 TRAPFRAME。
         sd ra, 40(a0)
         sd sp, 48(a0)
         sd gp, 56(a0)
@@ -60,48 +54,44 @@ uservec:
         sd t5, 272(a0)
         sd t6, 280(a0)
 
-	# save the user a0 in p->trapframe->a0
+	# 把此前暂存在 sscratch 中的用户 a0 保存到 p->trapframe->a0。
         csrr t0, sscratch
         sd t0, 112(a0)
 
-        # restore kernel stack pointer from p->trapframe->kernel_sp
+        # 从 p->trapframe->kernel_sp 装入内核栈指针。
         ld sp, 8(a0)
 
-        # make tp hold the current hartid, from p->trapframe->kernel_hartid
+        # 从 p->trapframe->kernel_hartid 恢复 tp，使其保存当前 hart 编号。
         ld tp, 32(a0)
 
-        # load the address of usertrap(), p->trapframe->kernel_trap
+        # 从 p->trapframe->kernel_trap 取出 usertrap() 的入口地址。
         ld t0, 16(a0)
 
-        # restore kernel page table from p->trapframe->kernel_satp
+        # 从 p->trapframe->kernel_satp 取出内核页表的 satp 值。
         ld t1, 0(a0)
         csrw satp, t1
         sfence.vma zero, zero
 
-        # a0 is no longer valid, since the kernel page
-        # table does not specially map p->tf.
+        # 切到内核页表后，a0 中的 TRAPFRAME 用户虚拟地址不再有效，
+        # 因为内核页表没有对 p->trapframe 做相同的固定地址映射。
 
-        # jump to usertrap(), which does not return
+        # 跳转到不会直接返回的 usertrap()。
         jr t0
 
 .globl userret
 userret:
-        # userret(TRAPFRAME, pagetable)
-        # switch from kernel to user.
-        # usertrapret() calls here.
-        # a0: TRAPFRAME, in user page table.
-        # a1: user page table, for satp.
+        # userret(TRAPFRAME, pagetable) 由 usertrapret() 调用，负责从内核返回用户态。
+        # a0 是用户页表中的 TRAPFRAME 地址，a1 是将写入 satp 的用户页表值。
 
-        # switch to the user page table.
+        # 写 satp 并刷新 TLB，切换到用户页表。
         csrw satp, a1
         sfence.vma zero, zero
 
-        # put the saved user a0 in sscratch, so we
-        # can swap it with our a0 (TRAPFRAME) in the last step.
+        # 先把保存的用户 a0 放入 sscratch，最后再与当前保存 TRAPFRAME 的 a0 交换。
         ld t0, 112(a0)
         csrw sscratch, t0
 
-        # restore all but a0 from TRAPFRAME
+        # 从 TRAPFRAME 恢复除 a0 外的所有用户寄存器。
         ld ra, 40(a0)
         ld sp, 48(a0)
         ld gp, 56(a0)
@@ -133,9 +123,8 @@ userret:
         ld t5, 272(a0)
         ld t6, 280(a0)
 
-	# restore user a0, and save TRAPFRAME in sscratch
+	# 恢复用户 a0，并把 TRAPFRAME 地址留在 sscratch 供下次陷阱使用。
         csrrw a0, sscratch, a0
         
-        # return to user mode and user pc.
-        # usertrapret() set up sstatus and sepc.
+        # usertrapret() 已设置好 sstatus 和 sepc；sret 返回用户模式及原用户 pc。
         sret
