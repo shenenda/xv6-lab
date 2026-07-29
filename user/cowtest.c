@@ -1,18 +1,18 @@
 //
-// tests for copy-on-write fork() assignment.
+// 写时复制 fork() 实验测试。
 //
 
 #include "kernel/types.h"
 #include "kernel/memlayout.h"
 #include "user/user.h"
 
-// allocate more than half of physical memory,
-// then fork. this will fail in the default
-// kernel, which does not support copy-on-write.
+// 先分配超过物理内存一半的空间再 fork。普通整页复制会因内存不足失败，
+// 只有共享只读页面并延迟复制的 COW 实现才能通过。
 void
 simpletest()
 {
   uint64 phys_size = PHYSTOP - KERNBASE;
+  // 选择约三分之二物理内存，确保父子各复制一份时总量会超过可用内存。
   int sz = (phys_size / 3) * 2;
 
   printf("simple: ");
@@ -23,6 +23,8 @@ simpletest()
     exit(-1);
   }
 
+  // 每页写一次，确保父进程的页面都已真实分配。
+  // 父进程覆盖整段；其写入结果不应被两个后代进程的写操作污染。
   for(char *q = p; q < p + sz; q += 4096){
     *(int*)q = getpid();
   }
@@ -46,10 +48,8 @@ simpletest()
   printf("ok\n");
 }
 
-// three processes all write COW memory.
-// this causes more than half of physical memory
-// to be allocated, so it also checks whether
-// copied pages are freed.
+// 三个进程分别写入共享的 COW 内存，迫使部分页面发生私有复制。
+// 总分配量超过物理内存一半，因此也能检查复制页是否在进程退出后及时释放。
 void
 threetest()
 {
@@ -77,9 +77,11 @@ threetest()
       exit(-1);
     }
     if(pid2 == 0){
+      // 孙进程写前五分之四区域，每次写都应触发独立的 COW 页面复制。
       for(char *q = p; q < p + (sz/5)*4; q += 4096){
         *(int*)q = getpid();
       }
+      // 孙进程写前五分之四区域，每次写都应触发独立的 COW 页面复制。
       for(char *q = p; q < p + (sz/5)*4; q += 4096){
         if(*(int*)q != getpid()){
           printf("wrong content\n");
@@ -88,12 +90,15 @@ threetest()
       }
       exit(-1);
     }
+    // 子进程只覆盖前一半，用不同值检查各进程物理页是否真正隔离。
     for(char *q = p; q < p + (sz/2); q += 4096){
       *(int*)q = 9999;
     }
     exit(0);
   }
 
+  // 每页写一次，确保父进程的页面都已真实分配。
+  // 父进程覆盖整段；其写入结果不应被两个后代进程的写操作污染。
   for(char *q = p; q < p + sz; q += 4096){
     *(int*)q = getpid();
   }
@@ -102,6 +107,7 @@ threetest()
 
   sleep(1);
 
+  // 每页写一次，确保父进程的页面都已真实分配。
   for(char *q = p; q < p + sz; q += 4096){
     if(*(int*)q != getpid()){
       printf("wrong content\n");
@@ -123,7 +129,7 @@ char junk2[4096];
 char buf[4096];
 char junk3[4096];
 
-// test whether copyout() simulates COW faults.
+// 测试 copyout() 向 COW 页面写数据时，能否主动完成与写页错误相同的复制流程。
 void
 filetest()
 {
@@ -143,6 +149,7 @@ filetest()
     }
     if(pid == 0){
       sleep(1);
+      // read 最终通过 copyout 写入子进程的 buf；buf 若仍共享，就必须先拆分 COW 页。
       if(read(fds[0], buf, sizeof(i)) != sizeof(i)){
         printf("error: read failed\n");
         exit(1);
@@ -169,6 +176,7 @@ filetest()
     }
   }
 
+  // 子进程通过 copyout 修改自己的 buf 后，父进程原值必须保持不变。
   if(buf[0] != 99){
     printf("error: child overwrote parent\n");
     exit(1);
@@ -182,7 +190,7 @@ main(int argc, char *argv[])
 {
   simpletest();
 
-  // check that the first simpletest() freed the physical memory.
+  // 再运行一次，确认第一次 simpletest() 占用的物理页已经全部释放。
   simpletest();
 
   threetest();
