@@ -70,6 +70,7 @@ gets(char *buf, int max)
   return buf;
 }
 
+// stat 是 open、fstat、close 的用户态组合封装。
 int
 stat(const char *n, struct stat *st)
 {
@@ -103,6 +104,7 @@ memmove(void *vdst, const void *vsrc, int n)
 
   dst = vdst;
   src = vsrc;
+  // 根据源、目标地址关系选择复制方向，避免内存区域重叠时覆盖尚未读取的数据。
   if (src > dst) {
     while(n-- > 0)
       *dst++ = *src++;

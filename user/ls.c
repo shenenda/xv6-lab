@@ -9,12 +9,12 @@ fmtname(char *path)
   static char buf[DIRSIZ+1];
   char *p;
 
-  // Find first character after last slash.
+  // 从字符串末尾向前找到最后一个斜杠，取出基本文件名。
   for(p=path+strlen(path); p >= path && *p != '/'; p--)
     ;
   p++;
 
-  // Return blank-padded name.
+  // 磁盘目录项名称固定为 DIRSIZ 字节；短名称用空格补齐以便对齐输出。
   if(strlen(p) >= DIRSIZ)
     return p;
   memmove(buf, p, strlen(p));
@@ -51,6 +51,7 @@ ls(char *path)
       printf("ls: path too long\n");
       break;
     }
+    // 在目录路径末尾预留一个 DIRSIZ 宽的目录项名称，逐项调用 stat。
     strcpy(buf, path);
     p = buf+strlen(buf);
     *p++ = '/';

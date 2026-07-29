@@ -28,6 +28,7 @@ printint(int fd, int xx, int base, int sgn)
   }
 
   i = 0;
+  // 取余会先得到最低位，因此暂存后再逆序输出。
   do{
     buf[i++] = digits[x % base];
   }while((x /= base) != 0);
@@ -47,13 +48,14 @@ printptr(int fd, uint64 x) {
     putc(fd, digits[x >> (sizeof(uint64) * 8 - 4)]);
 }
 
-// Print to the given fd. Only understands %d, %x, %p, %s.
+// 向指定文件描述符输出格式化文本，支持 %d、%l、%x、%p、%s、%c 和 %% 。
 void
 vprintf(int fd, const char *fmt, va_list ap)
 {
   char *s;
   int c, i, state;
 
+  // state 为 0 时输出普通字符，读到 % 后切换状态并消费一个格式说明符。
   state = 0;
   for(i = 0; fmt[i]; i++){
     c = fmt[i] & 0xff;
@@ -85,7 +87,7 @@ vprintf(int fd, const char *fmt, va_list ap)
       } else if(c == '%'){
         putc(fd, c);
       } else {
-        // Unknown % sequence.  Print it to draw attention.
+        // 原样输出未知的 % 序列，使格式串错误更容易被发现。
         putc(fd, '%');
         putc(fd, c);
       }
