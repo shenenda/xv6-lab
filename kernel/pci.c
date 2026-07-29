@@ -1,6 +1,5 @@
 //
-// simple PCI-Express initialization, only
-// works for qemu and its e1000 card.
+// 简化的 PCI Express 初始化，仅支持 QEMU virt 机器及其 E1000 网卡。
 //
 
 #include "types.h"
@@ -14,15 +13,13 @@
 void
 pci_init()
 {
-  // we'll place the e1000 registers at this address.
-  // vm.c maps this range.
+  // 把 E1000 寄存器 BAR 映射到该物理地址；vm.c 已为这段范围建立内核映射。
   uint64 e1000_regs = 0x40000000L;
 
-  // qemu -machine virt puts PCIe config space here.
-  // vm.c maps this range.
+  // QEMU -machine virt 把 PCIe 配置空间放在这里；vm.c 已映射该范围。
   uint32  *ecam = (uint32 *) 0x30000000L;
   
-  // look at each possible PCI device on bus 0.
+  // 扫描总线 0 上所有可能的设备号。
   for(int dev = 0; dev < 32; dev++){
     int bus = 0;
     int func = 0;
@@ -31,28 +28,24 @@ pci_init()
     volatile uint32 *base = ecam + off;
     uint32 id = base[0];
     
-    // 100e:8086 is an e1000
+    // 设备 ID 100e、厂商 ID 8086 对应 E1000。
     if(id == 0x100e8086){
-      // command and status register.
-      // bit 0 : I/O access enable
-      // bit 1 : memory access enable
-      // bit 2 : enable mastering
+      // 配置命令/状态寄存器：位 0 开启 I/O 访问，位 1 开启内存访问，
+      // 位 2 允许总线主控，使网卡能够发起 DMA。
       base[1] = 7;
       __sync_synchronize();
 
       for(int i = 0; i < 6; i++){
         uint32 old = base[4+i];
 
-        // writing all 1's to the BAR causes it to be
-        // replaced with its size.
+        // 向 BAR 写全 1 后再读回，硬件返回地址掩码，可据此计算 BAR 所需空间大小。
         base[4+i] = 0xffffffff;
         __sync_synchronize();
 
         base[4+i] = old;
       }
 
-      // tell the e1000 to reveal its registers at
-      // physical address 0x40000000.
+      // 把 BAR0 写为 0x40000000，使 E1000 寄存器出现在约定物理地址。
       base[4+0] = e1000_regs;
 
       e1000_init((uint32*)e1000_regs);

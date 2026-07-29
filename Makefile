@@ -1,9 +1,8 @@
 
-# To compile and run with a lab solution, set the lab name in lab.mk
-# (e.g., LAB=util).  Run make grade to test solution with the lab's
-# grade script (e.g., grade-lab-util).
+# 如需编译并运行某个实验解答，请在 lab.mk 中设置实验名（例如 LAB=util）。
+# 使用 make grade 可调用该实验的评分脚本（例如 grade-lab-util）进行测试。
 
-# To generate a candidate student repository for a lab, run e.g.
+# 如需生成某个实验的学生候选仓库，可执行例如：
 #   ./make-lab util
 
 -include conf/lab.mk
@@ -68,11 +67,11 @@ OBJS += \
 endif
 
 
-# riscv64-unknown-elf- or riscv64-linux-gnu-
-# perhaps in /opt/riscv/bin
+# 工具链前缀可能是 riscv64-unknown-elf- 或 riscv64-linux-gnu-，
+# 可执行文件可能位于 /opt/riscv/bin。
 #TOOLPREFIX = 
 
-# Try to infer the correct TOOLPREFIX if not set
+# 未显式设置 TOOLPREFIX 时，尝试自动推断正确的工具链前缀。
 ifndef TOOLPREFIX
 TOOLPREFIX := $(shell if riscv64-unknown-elf-objdump -i 2>&1 | grep 'elf64-big' >/dev/null 2>&1; \
 	then echo 'riscv64-unknown-elf-'; \
@@ -117,7 +116,7 @@ CFLAGS += -DKCSAN
 KCSANFLAG = -fsanitize=thread
 endif
 
-# Disable PIE when possible (for Ubuntu 16.10 toolchain)
+# 工具链支持时关闭 PIE，以兼容 Ubuntu 16.10 的工具链。
 ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]no-pie'),)
 CFLAGS += -fno-pie -no-pie
 endif
@@ -165,17 +164,15 @@ $U/usys.o : $U/usys.S
 	$(CC) $(CFLAGS) -c -o $U/usys.o $U/usys.S
 
 $U/_forktest: $U/forktest.o $(ULIB)
-	# forktest has less library code linked in - needs to be small
-	# in order to be able to max out the proc table.
+	# forktest 链接较少的库代码，保持程序足够小，才能优先耗尽进程表。
 	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $U/_forktest $U/forktest.o $U/ulib.o $U/usys.o
 	$(OBJDUMP) -S $U/_forktest > $U/forktest.asm
 
 mkfs/mkfs: mkfs/mkfs.c $K/fs.h $K/param.h
 	gcc $(XCFLAGS) -Werror -Wall -I. -o mkfs/mkfs mkfs/mkfs.c
 
-# Prevent deletion of intermediate files, e.g. cat.o, after first build, so
-# that disk image changes after first build are persistent until clean.  More
-# details:
+# 防止首次构建后删除 cat.o 等中间文件，使磁盘映像的增量变化一直保留到 clean。
+# 详细说明：
 # http://www.gnu.org/software/make/manual/html_node/Chained-Rules.html
 .PRECIOUS: %.o
 
@@ -277,9 +274,9 @@ clean:
 	$(UPROGS) \
 	ph barrier
 
-# try to generate a unique GDB port
+# 尝试为当前目录生成唯一的 GDB 端口。
 GDBPORT = $(shell expr `id -u` % 5000 + 25000)
-# QEMU's gdb stub command line changed in 0.11
+# QEMU 的 GDB stub 命令行格式从 0.11 版开始发生了变化。
 QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
 	then echo "-gdb tcp::$(GDBPORT)"; \
 	else echo "-s -p $(GDBPORT)"; fi)
@@ -312,7 +309,7 @@ qemu-gdb: $K/kernel .gdbinit fs.img
 	$(QEMU) $(QEMUOPTS) -S $(QEMUGDB)
 
 ifeq ($(LAB),net)
-# try to generate a unique port for the echo server
+# 尝试为回显服务器生成唯一端口。
 SERVERPORT = $(shell expr `id -u` % 5000 + 25099)
 
 server:
@@ -323,7 +320,7 @@ ping:
 endif
 
 ##
-##  FOR testing lab grading script
+##  用于测试实验评分脚本
 ##
 
 ifneq ($(V),@)
@@ -340,7 +337,7 @@ grade:
 	./grade-lab-$(LAB) $(GRADEFLAGS)
 
 ##
-## FOR web handin
+## 用于网页提交
 ##
 
 

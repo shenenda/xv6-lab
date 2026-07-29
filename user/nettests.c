@@ -4,8 +4,7 @@
 #include "user/user.h"
 
 //
-// send a UDP packet to the localhost (outside of qemu),
-// and receive a response.
+// 向 QEMU 外部的宿主机发送 UDP 数据包并接收响应。
 //
 static void
 ping(uint16 sport, uint16 dport, int attempts)
@@ -14,18 +13,17 @@ ping(uint16 sport, uint16 dport, int attempts)
   char *obuf = "a message from xv6!";
   uint32 dst;
 
-  // 10.0.2.2, which qemu remaps to the external host,
-  // i.e. the machine you're running qemu on.
+  // 在 QEMU 用户网络中，10.0.2.2 会被重定向到运行 QEMU 的宿主机。
   dst = (10 << 24) | (0 << 16) | (2 << 8) | (2 << 0);
 
-  // you can send a UDP packet to any Internet address
-  // by using a different dst.
+  // 把 dst 换成其他地址即可向相应互联网主机发送 UDP 包。
   
   if((fd = connect(dst, sport, dport)) < 0){
     fprintf(2, "ping: connect() failed\n");
     exit(1);
   }
 
+  // 连续发送 attempts 次，驱动必须正确推进并回收发送描述符。
   for(int i = 0; i < attempts; i++) {
     if(write(fd, obuf, strlen(obuf)) < 0){
       fprintf(2, "ping: send() failed\n");
@@ -48,7 +46,7 @@ ping(uint16 sport, uint16 dport, int attempts)
   }
 }
 
-// Encode a DNS name
+// 把点分域名编码为 DNS 的长度前缀标签格式。
 static void
 encode_qname(char *qn, char *host)
 {
@@ -60,13 +58,13 @@ encode_qname(char *qn, char *host)
       for(char *d = l; d < c; d++) {
         *qn++ = *d;
       }
-      l = c+1; // skip .
+      l = c+1; // 跳过标签后的点号。
     }
   }
   *qn = '\0';
 }
 
-// Decode a DNS name
+// 从 DNS 标签格式解码域名。
 static void
 decode_qname(char *qn)
 {
@@ -82,12 +80,13 @@ decode_qname(char *qn)
   }
 }
 
-// Make a DNS request
+// 构造 DNS A 记录查询。
 static int
 dns_req(uint8 *obuf)
 {
   int len = 0;
   
+  // 把字节缓冲区起始位置解释为 DNS 头；后续字段按网络字节序写入。
   struct dns *hdr = (struct dns *) obuf;
   hdr->id = htons(6828);
   hdr->rd = 1;
@@ -95,13 +94,13 @@ dns_req(uint8 *obuf)
   
   len += sizeof(struct dns);
   
-  // qname part of question
+  // 写入问题区的 QNAME 域名。
   char *qname = (char *) (obuf + sizeof(struct dns));
   char *s = "pdos.csail.mit.edu.";
   encode_qname(qname, s);
   len += strlen(qname) + 1;
 
-  // constants part of question
+  // 写入固定的查询类型 A 与类别 IN。
   struct dns_question *h = (struct dns_question *) (qname+strlen(qname)+1);
   h->qtype = htons(0x1);
   h->qclass = htons(0x1);
@@ -110,7 +109,7 @@ dns_req(uint8 *obuf)
   return len;
 }
 
-// Process DNS response
+// 解析 DNS 响应并输出 IPv4 地址。
 static void
 dns_rep(uint8 *ibuf, int cc)
 {
@@ -150,7 +149,7 @@ dns_rep(uint8 *ibuf, int cc)
   for(int i = 0; i < ntohs(hdr->ancount); i++) {
     char *qn = (char *) (ibuf+len);
     
-    if((int) qn[0] > 63) {  // compression?
+    if((int) qn[0] > 63) {  // 高两位为 11 表示 DNS 名称压缩指针。
       qn = (char *)(ibuf+qn[1]);
       len += 2;
     } else {
@@ -197,7 +196,7 @@ dns()
   memset(obuf, 0, N);
   memset(ibuf, 0, N);
   
-  // 8.8.8.8: google's name server
+  // 8.8.8.8 是 Google 公共 DNS 服务器。
   dst = (8 << 24) | (8 << 16) | (8 << 8) | (8 << 0);
 
   if((fd = connect(dst, 10000, 53)) < 0){

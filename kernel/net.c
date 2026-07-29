@@ -1,5 +1,5 @@
 //
-// networking protocol support (IP, UDP, ARP, etc.).
+// 网络协议支持，包括 IP、UDP 和 ARP 等。
 //
 
 #include "types.h"
@@ -11,12 +11,11 @@
 #include "net.h"
 #include "defs.h"
 
-static uint32 local_ip = MAKE_IP_ADDR(10, 0, 2, 15); // qemu's idea of the guest IP
+static uint32 local_ip = MAKE_IP_ADDR(10, 0, 2, 15); // QEMU 用户网络为来宾分配的 IP。
 static uint8 local_mac[ETHADDR_LEN] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
 static uint8 broadcast_mac[ETHADDR_LEN] = { 0xFF, 0XFF, 0XFF, 0XFF, 0XFF, 0XFF };
 
-// Strips data from the start of the buffer and returns a pointer to it.
-// Returns 0 if less than the full requested length is available.
+// 从缓冲区头部移除 len 字节并返回原头指针；可用数据不足时返回 0。
 char *
 mbufpull(struct mbuf *m, unsigned int len)
 {
@@ -28,7 +27,7 @@ mbufpull(struct mbuf *m, unsigned int len)
   return tmp;
 }
 
-// Prepends data to the beginning of the buffer and returns a pointer to it.
+// 在缓冲区头部预留 len 字节并返回新头指针，常用于逐层添加协议头。
 char *
 mbufpush(struct mbuf *m, unsigned int len)
 {
@@ -39,7 +38,7 @@ mbufpush(struct mbuf *m, unsigned int len)
   return m->head;
 }
 
-// Appends data to the end of the buffer and returns a pointer to it.
+// 在缓冲区尾部追加 len 字节并返回追加区域的起始指针。
 char *
 mbufput(struct mbuf *m, unsigned int len)
 {
@@ -50,8 +49,7 @@ mbufput(struct mbuf *m, unsigned int len)
   return tmp;
 }
 
-// Strips data from the end of the buffer and returns a pointer to it.
-// Returns 0 if less than the full requested length is available.
+// 从缓冲区尾部移除 len 字节并返回新的尾指针；可用数据不足时返回 0。
 char *
 mbuftrim(struct mbuf *m, unsigned int len)
 {
@@ -61,7 +59,7 @@ mbuftrim(struct mbuf *m, unsigned int len)
   return m->head + m->len;
 }
 
-// Allocates a packet buffer.
+// 分配一个包缓冲区，并在数据头之前预留 headroom 字节。
 struct mbuf *
 mbufalloc(unsigned int headroom)
 {
@@ -73,20 +71,21 @@ mbufalloc(unsigned int headroom)
   if (m == 0)
     return 0;
   m->next = 0;
+  // head 从预留空间之后开始，使发送路径可以向前 push 多层协议头。
   m->head = (char *)m->buf + headroom;
   m->len = 0;
   memset(m->buf, 0, sizeof(m->buf));
   return m;
 }
 
-// Frees a packet buffer.
+// 释放包缓冲区。
 void
 mbuffree(struct mbuf *m)
 {
   kfree(m);
 }
 
-// Pushes an mbuf to the end of the queue.
+// 把 mbuf 插入队列尾部。
 void
 mbufq_pushtail(struct mbufq *q, struct mbuf *m)
 {
@@ -99,7 +98,7 @@ mbufq_pushtail(struct mbufq *q, struct mbuf *m)
   q->tail = m;
 }
 
-// Pops an mbuf from the start of the queue.
+// 从队列头部取出一个 mbuf。
 struct mbuf *
 mbufq_pophead(struct mbufq *q)
 {
@@ -110,14 +109,14 @@ mbufq_pophead(struct mbufq *q)
   return head;
 }
 
-// Returns one (nonzero) if the queue is empty.
+// 队列为空时返回非 0。
 int
 mbufq_empty(struct mbufq *q)
 {
   return q->head == 0;
 }
 
-// Intializes a queue of mbufs.
+// 初始化 mbuf 队列。
 void
 mbufq_init(struct mbufq *q)
 {
@@ -135,31 +134,30 @@ in_cksum(const unsigned char *addr, int len)
   unsigned short answer = 0;
 
   /*
-   * Our algorithm is simple, using a 32 bit accumulator (sum), we add
-   * sequential 16 bit words to it, and at the end, fold back all the
-   * carry bits from the top 16 bits into the lower 16 bits.
+   * 使用 32 位累加器依次相加所有 16 位字，最后把高 16 位产生的进位
+   * 折回低 16 位，得到互联网校验和。
    */
   while (nleft > 1)  {
     sum += *w++;
     nleft -= 2;
   }
 
-  /* mop up an odd byte, if necessary */
+  /* 长度为奇数时，把最后一个字节补入累加和。 */
   if (nleft == 1) {
     *(unsigned char *)(&answer) = *(const unsigned char *)w;
     sum += answer;
   }
 
-  /* add back carry outs from top 16 bits to low 16 bits */
+  /* 把高 16 位进位反复折回低 16 位。 */
   sum = (sum & 0xffff) + (sum >> 16);
   sum += (sum >> 16);
-  /* guaranteed now that the lower 16 bits of sum are correct */
+  /* 此时 sum 的低 16 位已经完成回卷求和。 */
 
-  answer = ~sum; /* truncate to 16 bits */
+  answer = ~sum; /* 取反并截断为 16 位校验和。 */
   return answer;
 }
 
-// sends an ethernet packet
+// 组装并发送以太网帧。
 static void
 net_tx_eth(struct mbuf *m, uint16 ethtype)
 {
@@ -167,9 +165,8 @@ net_tx_eth(struct mbuf *m, uint16 ethtype)
 
   ethhdr = mbufpushhdr(m, *ethhdr);
   memmove(ethhdr->shost, local_mac, ETHADDR_LEN);
-  // In a real networking stack, dhost would be set to the address discovered
-  // through ARP. Because we don't support enough of the ARP protocol, set it
-  // to broadcast instead.
+  // 完整协议栈应通过 ARP 缓存取得目标 MAC；当前实现的 ARP 功能有限，
+  // 因而把目标地址统一设为广播地址。
   memmove(ethhdr->dhost, broadcast_mac, ETHADDR_LEN);
   ethhdr->type = htons(ethtype);
   if (e1000_transmit(m)) {
@@ -177,15 +174,16 @@ net_tx_eth(struct mbuf *m, uint16 ethtype)
   }
 }
 
-// sends an IP packet
+// 在现有负载前添加 IPv4 头并发送。
 static void
 net_tx_ip(struct mbuf *m, uint8 proto, uint32 dip)
 {
   struct ip *iphdr;
 
-  // push the IP header
+  // 从 headroom 中向前扩展出 IP 头。
   iphdr = mbufpushhdr(m, *iphdr);
   memset(iphdr, 0, sizeof(*iphdr));
+  // 高 4 位是 IPv4 版本，低 4 位是以 4 字节为单位的首部长度。
   iphdr->ip_vhl = (4 << 4) | (20 >> 2);
   iphdr->ip_p = proto;
   iphdr->ip_src = htonl(local_ip);
@@ -194,29 +192,29 @@ net_tx_ip(struct mbuf *m, uint8 proto, uint32 dip)
   iphdr->ip_ttl = 100;
   iphdr->ip_sum = in_cksum((unsigned char *)iphdr, sizeof(*iphdr));
 
-  // now on to the ethernet layer
+  // IP 头完成后继续交给以太网层封装。
   net_tx_eth(m, ETHTYPE_IP);
 }
 
-// sends a UDP packet
+// 在现有负载前添加 UDP 头并发送。
 void
 net_tx_udp(struct mbuf *m, uint32 dip,
            uint16 sport, uint16 dport)
 {
   struct udp *udphdr;
 
-  // put the UDP header
+  // 从 headroom 中向前扩展出 UDP 头，并转换为网络字节序。
   udphdr = mbufpushhdr(m, *udphdr);
   udphdr->sport = htons(sport);
   udphdr->dport = htons(dport);
   udphdr->ulen = htons(m->len);
-  udphdr->sum = 0; // zero means no checksum is provided
+  udphdr->sum = 0; // UDP 校验和为 0 表示发送端未提供校验和。
 
-  // now on to the IP layer
+  // UDP 头完成后继续交给 IP 层封装。
   net_tx_ip(m, IPPROTO_UDP, dip);
 }
 
-// sends an ARP packet
+// 构造并发送 ARP 数据包。
 static int
 net_tx_arp(uint16 op, uint8 dmac[ETHADDR_LEN], uint32 dip)
 {
@@ -227,7 +225,7 @@ net_tx_arp(uint16 op, uint8 dmac[ETHADDR_LEN], uint32 dip)
   if (!m)
     return -1;
 
-  // generic part of ARP header
+  // 填写 ARP 头中硬件类型、协议类型、地址长度和操作码。
   arphdr = mbufputhdr(m, *arphdr);
   arphdr->hrd = htons(ARP_HRD_ETHER);
   arphdr->pro = htons(ETHTYPE_IP);
@@ -235,18 +233,18 @@ net_tx_arp(uint16 op, uint8 dmac[ETHADDR_LEN], uint32 dip)
   arphdr->pln = sizeof(uint32);
   arphdr->op = htons(op);
 
-  // ethernet + IP part of ARP header
+  // 填写发送方与目标方的 MAC/IP 地址。
   memmove(arphdr->sha, local_mac, ETHADDR_LEN);
   arphdr->sip = htonl(local_ip);
   memmove(arphdr->tha, dmac, ETHADDR_LEN);
   arphdr->tip = htonl(dip);
 
-  // header is ready, send the packet
+  // ARP 头已完成，交给以太网层发送。
   net_tx_eth(m, ETHTYPE_ARP);
   return 0;
 }
 
-// receives an ARP packet
+// 接收并处理 ARP 数据包。
 static void
 net_rx_arp(struct mbuf *m)
 {
@@ -258,7 +256,7 @@ net_rx_arp(struct mbuf *m)
   if (!arphdr)
     goto done;
 
-  // validate the ARP header
+  // 只接受以太网上承载 IPv4、且地址长度符合预期的 ARP 包。
   if (ntohs(arphdr->hrd) != ARP_HRD_ETHER ||
       ntohs(arphdr->pro) != ETHTYPE_IP ||
       arphdr->hln != ETHADDR_LEN ||
@@ -266,22 +264,21 @@ net_rx_arp(struct mbuf *m)
     goto done;
   }
 
-  // only requests are supported so far
-  // check if our IP was solicited
-  tip = ntohl(arphdr->tip); // target IP address
+  // 当前只支持发给本机 IP 的 ARP 请求。
+  tip = ntohl(arphdr->tip); // 目标 IP 地址。
   if (ntohs(arphdr->op) != ARP_OP_REQUEST || tip != local_ip)
     goto done;
 
-  // handle the ARP request
-  memmove(smac, arphdr->sha, ETHADDR_LEN); // sender's ethernet address
-  sip = ntohl(arphdr->sip); // sender's IP address (qemu's slirp)
+  // 取出请求方地址，向其发送 ARP 回复。
+  memmove(smac, arphdr->sha, ETHADDR_LEN); // 发送方 MAC 地址。
+  sip = ntohl(arphdr->sip); // 发送方 IP，即 QEMU slirp 地址。
   net_tx_arp(ARP_OP_REPLY, smac, sip);
 
 done:
   mbuffree(m);
 }
 
-// receives a UDP packet
+// 接收并校验 UDP 数据包。
 static void
 net_rx_udp(struct mbuf *m, uint16 len, struct ip *iphdr)
 {
@@ -294,18 +291,18 @@ net_rx_udp(struct mbuf *m, uint16 len, struct ip *iphdr)
   if (!udphdr)
     goto fail;
 
-  // TODO: validate UDP checksum
+  // TODO：尚未校验 UDP 校验和。
 
-  // validate lengths reported in headers
+  // UDP 头声明的长度必须与 IP 层传入长度一致，且不能超过 mbuf 剩余数据。
   if (ntohs(udphdr->ulen) != len)
     goto fail;
   len -= sizeof(*udphdr);
   if (len > m->len)
     goto fail;
-  // minimum packet size could be larger than the payload
+  // 以太网最小帧可能含填充字节，把 mbuf 尾部裁剪到真实 UDP 负载长度。
   mbuftrim(m, m->len - len);
 
-  // parse the necessary fields
+  // 解析源地址和端口，再按本地/远端端口顺序投递给 socket 层。
   sip = ntohl(iphdr->ip_src);
   sport = ntohs(udphdr->sport);
   dport = ntohs(udphdr->dport);
@@ -316,7 +313,7 @@ fail:
   mbuffree(m);
 }
 
-// receives an IP packet
+// 接收并校验 IPv4 数据包。
 static void
 net_rx_ip(struct mbuf *m)
 {
@@ -327,19 +324,19 @@ net_rx_ip(struct mbuf *m)
   if (!iphdr)
 	  goto fail;
 
-  // check IP version and header len
+  // 当前只接受无选项的 IPv4 固定 20 字节首部。
   if (iphdr->ip_vhl != ((4 << 4) | (20 >> 2)))
     goto fail;
-  // validate IP checksum
+  // 重新计算 IP 首部校验和；正确报文的结果应为 0。
   if (in_cksum((unsigned char *)iphdr, sizeof(*iphdr)))
     goto fail;
-  // can't support fragmented IP packets
+  // 当前协议栈不支持 IP 分片。
   if (htons(iphdr->ip_off) != 0)
     goto fail;
-  // is the packet addressed to us?
+  // 丢弃目标 IP 不是本机的报文。
   if (htonl(iphdr->ip_dst) != local_ip)
     goto fail;
-  // can only support UDP
+  // 当前 IP 层只向上分发 UDP。
   if (iphdr->ip_p != IPPROTO_UDP)
     goto fail;
 
@@ -351,8 +348,7 @@ fail:
   mbuffree(m);
 }
 
-// called by e1000 driver's interrupt handler to deliver a packet to the
-// networking stack
+// 由 E1000 中断处理程序调用，把收到的以太网帧递交给协议栈。
 void net_rx(struct mbuf *m)
 {
   struct eth *ethhdr;
@@ -364,6 +360,7 @@ void net_rx(struct mbuf *m)
     return;
   }
 
+  // EtherType 使用网络字节序，转换后选择 IP 或 ARP 处理路径。
   type = ntohs(ethhdr->type);
   if (type == ETHTYPE_IP)
     net_rx_ip(m);
