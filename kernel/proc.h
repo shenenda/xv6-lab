@@ -99,4 +99,5 @@ struct proc {
   struct file *ofile[NOFILE];  // 已打开文件表。
   struct inode *cwd;           // 当前工作目录。
   char name[16];               // 进程名，仅用于调试。
+  pagetable_t kama_kernelpgtbl;//存储进程独享的内核态页表
 };

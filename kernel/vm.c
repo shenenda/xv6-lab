@@ -15,36 +15,71 @@ extern char etext[];  // kernel.ld 将其设为内核代码的结束地址。
 
 extern char trampoline[]; // trampoline.S 中定义的跳板页代码。
 
-/*
- * 为内核创建直接映射页表，虚拟地址与物理地址相同。
- */
+static void kama_kvm_map_pagetable(pagetable_t pgtbl);
+
+
+//全局内核页表仍然使用kvminit函数来初始化,也可以创建各个进程独享的页表
 void
-kvminit()
+kvminit(void)
 {
-  kernel_pagetable = (pagetable_t) kalloc();
-  // 根页表本身占一页物理内存；清零后所有 PTE 初始都处于无效状态。
-  memset(kernel_pagetable, 0, PGSIZE);
+  kernel_pagetable = kama_kvminit_newpgtbl();
+  //全局内核页表kernel_pagetable 仍需要映射CLINT
+  kvmmap(kernel_pagetable, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+
+  if(kernel_pagetable == 0)
+    panic("kvminit");
+}
+
+//创建一个页表并初始化映射，返回这个页表
+pagetable_t
+kama_kvminit_newpgtbl(void)
+{
+  pagetable_t pgtbl;
+
+  pgtbl = (pagetable_t)kalloc();
+  if(pgtbl == 0)
+    return 0;
+
+  memset(pgtbl, 0, PGSIZE);
+
+  kama_kvm_map_pagetable(pgtbl);
+
+  return pgtbl;
+}
+
+//初始化页表映射函数
+static void
+kama_kvm_map_pagetable(pagetable_t pgtbl)
+{
+  // 将各种内核需要的 direct mapping 添加到页表 pgtbl 中
 
   // 映射 UART 寄存器。kvmmap()是在内核页表中建立一段虚拟地址到物理地址的映射
-  kvmmap(UART0, UART0, PGSIZE, PTE_R | PTE_W);
+  kvmmap(pgtbl, UART0, UART0, PGSIZE, PTE_R | PTE_W);
 
   // 映射 VirtIO 磁盘的 MMIO 接口。 前两个参数分别是虚拟地址和物理地址，相同代表是直接映射
-  kvmmap(VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+  kvmmap(pgtbl, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
 
-  // 映射核间中断与定时器使用的 CLINT。
-  kvmmap(CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+  //// 映射核间中断与定时器使用的 CLINT。
+  //kvmmap(pgtbl, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+  //CLINT仅在内核启动的时候需要使用到，而用户进程在内核态中的操作并不需要使用到该映射，并且该映射会与要map的程序内存冲突
 
   // 映射管理外部设备中断的 PLIC。
-  kvmmap(PLIC, PLIC, 0x400000, PTE_R | PTE_W);
+  kvmmap(pgtbl, PLIC, PLIC, 0x400000, PTE_R | PTE_W);
 
-  // 内核代码段只读、可执行。
-  kvmmap(KERNBASE, KERNBASE, (uint64)etext-KERNBASE, PTE_R | PTE_X);
+  // 映射内核代码段：可读、可执行，不可写
+  kvmmap(pgtbl, KERNBASE, KERNBASE,
+         (uint64)etext - KERNBASE,
+         PTE_R | PTE_X);
 
-  // 内核数据段以及可用物理内存可读、可写。
-  kvmmap((uint64)etext, (uint64)etext, PHYSTOP-(uint64)etext, PTE_R | PTE_W);
+  // 映射内核数据段以及 xv6 使用的物理内存：可读、可写
+  kvmmap(pgtbl, (uint64)etext, (uint64)etext,
+         PHYSTOP - (uint64)etext,
+         PTE_R | PTE_W);
 
-  // 将陷阱进入与返回使用的跳板页映射到内核最高虚拟地址。
-  kvmmap(TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+  // 将 trampoline 映射到内核虚拟地址空间的最高页面
+  kvmmap(pgtbl, TRAMPOLINE, (uint64)trampoline,
+         PGSIZE,
+         PTE_R | PTE_X);
 }
 
 // 将硬件页表寄存器切换为内核页表，并开启分页。
@@ -120,25 +155,28 @@ walkaddr(pagetable_t pagetable, uint64 va)
   return pa;
 }
 
-// 向内核页表中添加映射，仅在启动阶段使用。
-// 本函数不会刷新 TLB，也不会开启分页。
+// 向页表中添加从虚拟地址到物理地址的映射，仅在启动阶段使用。
+//进行修改：原来只处理内核进程的页表
+//现在修改为可以处理所有页表
 void
-kvmmap(uint64 va, uint64 pa, uint64 sz, int perm)
+kvmmap(pagetable_t pgtbl, uint64 va, uint64 pa, uint64 sz, int perm)
 {
-  if(mappages(kernel_pagetable, va, sz, pa, perm) != 0)
+  if(mappages(pgtbl, va, sz, pa, perm) != 0)
     panic("kvmmap");
 }
 
-// 将内核虚拟地址转换为物理地址，目前只用于内核栈地址。
+// 将虚拟地址转换为物理地址
+//进行修改：原来只处理内核进程的页表
+//现在修改为可以处理所有页表
 uint64
-kvmpa(uint64 va)
+kvmpa(pagetable_t pgtbl, uint64 va)
 {
   // 对页大小取模得到 va 在页面内部的字节偏移。
   uint64 off = va % PGSIZE;
   pte_t *pte;
   uint64 pa;
   
-  pte = walk(kernel_pagetable, va, 0);
+  pte = walk(pgtbl, va, 0);
   if(pte == 0)
     panic("kvmpa");
   if((*pte & PTE_V) == 0)
@@ -414,27 +452,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
-  uint64 n, va0, pa0;
-
-  while(len > 0){
-    // 先定位 srcva 所在页，再将该用户页转换成内核可访问的物理地址。
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
-    // 本轮最多读取当前页尾，不能一次 memmove 直接跨越两张物理页。
-    n = PGSIZE - (srcva - va0);
-    if(n > len)
-      n = len;
-    // 物理页地址加页内偏移，得到当前数据在内存中的实际起点。
-    memmove(dst, (void *)(pa0 + (srcva - va0)), n);
-
-    // 目标指针和剩余长度按实际复制量推进，下一轮从下一用户页开始。
-    len -= n;
-    dst += n;
-    srcva = va0 + PGSIZE;
-  }
-  return 0;
+  return copyin_new(pagetable, dst, srcva, len);
 }
 
 // 从用户空间向内核复制以空字符结尾的字符串。
@@ -444,44 +462,205 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 int
 copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
-  uint64 n, va0, pa0;
-  // got_null 记录是否已经遇到字符串结束符，用于区分成功和长度耗尽。
-  int got_null = 0;
+  return copyinstr_new(pagetable, dst, srcva, max);
+}
 
-  while(got_null == 0 && max > 0){
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    // 外层循环按页转换地址，避免直接跨越用户页边界读取。
-    if(pa0 == 0)
-      return -1;
-    n = PGSIZE - (srcva - va0);
-    if(n > max)
-      n = max;
 
-    // p 指向用户字符串在当前物理页中的第一个待复制字节。
-    char *p = (char *) (pa0 + (srcva - va0));
-    while(n > 0){
-      // 内层循环只扫描当前页，并在遇到字符串结束符时立即停止。
-      if(*p == '\0'){
-        *dst = '\0';
-        got_null = 1;
-        break;
-      } else {
-        *dst = *p;
+// 递归打印一棵三级页表。
+// pagetable：当前正在遍历的页表页地址。第一次调用时传入根页表，递归时传入下一级页表。
+// depth：当前递归深度，只用于控制打印缩进。
+int
+kama_pgtblprint(pagetable_t pagetable, int depth)
+{
+  // 一个页表页的大小是 4096 字节。每个 PTE 占 8 字节，因此一个页表页中一共有：512个PTE
+  for(int i = 0; i < 512; i++){
+    // pagetable_t 本质上是一个 pte_t *：
+    //
+    //     typedef uint64 pte_t;
+    //     typedef uint64 *pagetable_t;
+    //
+    // 因此 pagetable[i] 就表示当前页表中的第 i 个页表项。
+    pte_t pte = pagetable[i];
+
+    // PTE_V 是页表项的有效位 Valid。
+    //
+    // 如果 PTE_V == 0，说明这个页表项没有被使用：
+    //   1. 它不指向下一级页表；
+    //   2. 它也不映射任何最终物理页。
+    //
+    // 因此无效 PTE 不需要打印，也不能继续递归访问。
+    if(pte & PTE_V){
+      // 先打印第一组 ".."。
+      //
+      // 然后根据 depth 继续打印缩进，使输出具有树形层次：
+      //
+      // depth == 0：
+      //   ..
+      //
+      // depth == 1：
+      //   .. ..
+      //
+      // depth == 2：
+      //   .. .. ..
+      printf("..");
+
+      for(int j = 0; j < depth; j++){
+        printf(" ..");
       }
-      // n 限制当前页内的读取，max 限制调用者允许的总复制长度。
-      --n;
-      --max;
-      p++;
-      dst++;
-    }
 
-    // 当前页没有找到 '\0' 时，下一轮从下一页页首继续搜索。
-    srcva = va0 + PGSIZE;
+      // 打印当前有效页表项的信息：
+      //
+      // i：
+      //   当前 PTE 在这个页表页中的下标，范围为 0～511。
+      //
+      // pte：
+      //   完整的 64 位页表项，其中包含：
+      //   - 物理页号 PPN；
+      //   - V、R、W、X、U 等标志位。
+      //
+      // PTE2PA(pte)：
+      //   从 PTE 中提取物理页号 PPN，并将其转换为
+      //   页对齐的物理地址。
+      printf("%d: pte %p pa %p\n", i, pte, PTE2PA(pte));
+
+      // 判断当前 PTE 是“中间页表项”还是“叶子页表项”。
+      //
+      // 在 RISC-V Sv39 中：
+      //
+      // 1. 如果 PTE 有效，并且 R、W、X 全部为 0：
+      //
+      //      V = 1
+      //      R = 0
+      //      W = 0
+      //      X = 0
+      //
+      //    那么这个 PTE 不是最终映射，而是指向下一级页表。
+      //
+      // 2. 如果 R、W、X 中至少有一位为 1，
+      //    那么这是叶子 PTE，表示已经找到最终映射的物理页，
+      //    不应该继续把这个物理页当作页表递归。
+      if((pte & (PTE_R | PTE_W | PTE_X)) == 0){
+        // 当前 PTE 是中间页表项。
+        //
+        // PTE2PA(pte) 提取该 PTE 中保存的物理页号，
+        // 得到下一级页表页的物理起始地址。
+        uint64 child = PTE2PA(pte);
+
+        // child 当前是一个 uint64 地址值。
+        //
+        // 递归函数需要的是 pagetable_t，也就是 pte_t *，
+        // 因此需要把 child 转换为页表指针。
+        //
+        // xv6 可以这样直接转换，是因为内核对物理 RAM
+        // 建立了直接映射：
+        //
+        //     内核虚拟地址 VA == 物理地址 PA
+        //
+        // 所以页表页的物理地址，可以直接作为内核指针访问。
+        //
+        // 在更复杂的操作系统中，物理地址通常不能直接强制
+        // 转换成指针，而需要先转换成对应的内核虚拟地址。
+        kama_pgtblprint((pagetable_t)child, depth + 1);
+      }
+    }
   }
-  if(got_null){
-    return 0;
-  } else {
-    return -1;
+
+  return 0;
+}
+
+
+// 打印页表的对外入口函数。
+//
+// pagetable：要打印的根页表。
+int
+kama_vmprint(pagetable_t pagetable)
+{
+  // 先打印根页表本身的地址。
+  printf("page table %p\n", pagetable);
+
+  // 从根页表开始递归遍历。
+  //
+  // depth 初始为 0，表示当前位于页表树的最顶层 L2。
+  return kama_pgtblprint(pagetable, 0);
+}
+
+
+/*
+kama_kvmcopymappings() 逐页查询用户页表 src，
+取出每个用户虚拟页对应的物理地址和权限，
+然后在进程内核页表 dst 中建立指向同一物理页的映射，
+同时清除 PTE_U；
+如果中途失败，只撤销新建映射，不释放共享的物理页。
+*/
+// 将 src 页表中 [start, start + sz) 范围内的页映射
+// 复制到 dst 页表中。
+// 只复制映射关系，不复制物理页内容。
+int
+kama_kvmcopymappings(pagetable_t src,
+                     pagetable_t dst,
+                     uint64 start,
+                     uint64 sz)
+{
+  pte_t *pte;
+  uint64 pa, i;
+  uint flags;
+
+  //PGROUNDUP:将地址向上取整到页边界，防止重新映射已经映射的页
+  for(i = PGROUNDUP(start);
+      i < start + sz;
+      i += PGSIZE){
+
+    if((pte = walk(src, i, 0)) == 0)
+      panic("kvmcopymappings: pte should exist");
+
+    if((*pte & PTE_V) == 0)
+      panic("kvmcopymappings: page not present");
+
+    //从源PTE中提取物理页的起始地址
+    pa = PTE2PA(*pte);
+
+    // & ~PTE_U 表示将该页的权限设置为非用户页（清除PTE_U）
+    // 必须设置该权限，因为RISC-V中，内核无法直接访问用户页
+    flags = PTE_FLAGS(*pte) & ~PTE_U;
+
+    if(mappages(dst, i, PGSIZE, pa, flags) != 0)
+      goto err;
   }
+
+  return 0;
+
+err:
+  // 解除页表中已经映射的页表项
+  uvmunmap(dst,
+           PGROUNDUP(start),
+           (i - PGROUNDUP(start)) / PGSIZE,
+           0);
+  return -1;
+}
+
+
+//将程序内存从oldsz缩减到newsz，但不释放实际内存
+// 将页表 pagetable 中 [newsz, oldsz) 对应的整页映射删除。
+// 只解除映射，不释放物理页。
+uint64
+kama_kvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
+{
+  // newsz 没有比 oldsz 小，说明不需要缩容。
+  if(newsz >= oldsz)
+    return oldsz;
+
+  // 只有跨过了页边界，才有完整页面可以解除映射。
+  if(PGROUNDUP(newsz) < PGROUNDUP(oldsz)){
+    int npages =
+      (PGROUNDUP(oldsz) - PGROUNDUP(newsz)) / PGSIZE;
+
+    uvmunmap(
+      pagetable,
+      PGROUNDUP(newsz),
+      npages,
+      0
+    );
+  }
+
+  return newsz;
 }

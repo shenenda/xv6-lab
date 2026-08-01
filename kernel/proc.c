@@ -18,6 +18,7 @@ struct spinlock pid_lock;
 extern void forkret(void);
 static void wakeup1(struct proc *chan);
 static void freeproc(struct proc *p);
+static void kama_kvm_free_kernelpgtbl(pagetable_t pagetable);
 
 extern char trampoline[]; // trampoline.S
 
@@ -26,11 +27,17 @@ void
 procinit(void)
 {
   struct proc *p;
-  
+
   initlock(&pid_lock, "nextpid");
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
+      /*原来所有内核栈都统一映射在全局内核页表中，
+      所以可以在 procinit() 启动时一次性创建；
+      改成每进程内核页表后，必须等该进程的 kpagetable 创建出来，
+      再分配和映射它的内核栈，
+      因此放到 allocproc() 中最符合资源归属和生命周期。*/
 
+      /*
       // 为每个进程预先分配一页内核栈，并映射到高虚拟地址。
       // 每个内核栈旁边留有一个无效保护页，用于尽早发现栈越界。
       char *pa = kalloc();
@@ -39,6 +46,11 @@ procinit(void)
       uint64 va = KSTACK((int) (p - proc));
       kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
       p->kstack = va;
+      */
+
+     //注释原本代码：为所有进程预分配内核栈，
+     //改为在创建进程的时候再创建内核栈，为进程创建独立的内核页表
+     //然后讲专属 的内核栈固定到内核页表的固定位置，建立映射
   }
   kvminithart();
 }
@@ -72,7 +84,7 @@ myproc(void) {
 int
 allocpid() {
   int pid;
-  
+
   // nextpid 是全局递增计数，必须加锁保证不同 CPU 不会分配出相同 pid。
   acquire(&pid_lock);
   pid = nextpid;
@@ -100,6 +112,10 @@ allocproc(void)
   return 0;
 
 found:
+  // 这些字段必须先清零，保证后续任一步分配失败时 freeproc() 都能安全回滚。
+  p->kama_kernelpgtbl = 0;
+  p->kstack = 0;
+
   p->pid = allocpid();
 
   // 为保存用户寄存器的 trapframe 分配一页内存。
@@ -115,6 +131,26 @@ found:
     release(&p->lock);
     return 0;
   }
+
+  //每次调用，为新进程创建独立的内核页表，并将内核所需要的各种映射添加到新页表上
+  p->kama_kernelpgtbl = kama_kvminit_newpgtbl();
+  if(p->kama_kernelpgtbl == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+  //分配一个物理页，作为新进程的内核栈使用
+  // 为每个进程预先分配一页内核栈，并映射到高虚拟地址。
+  // 每个内核栈旁边留有一个无效保护页，用于尽早发现栈越界。
+  char *pa = kalloc();
+  if(pa == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+  uint64 va = KSTACK((int)0); // 每个进程仍使用自己的内核栈虚拟地址槽位。
+  kvmmap(p->kama_kernelpgtbl, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+  p->kstack = va; //记录内核栈的虚拟地址
 
   // 构造新进程的初始内核上下文：第一次被调度时从 forkret 开始，
   // 再经 usertrapret 返回用户态。
@@ -142,6 +178,24 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+
+  // freeproc() 也会被分配失败路径调用，所以必须允许内核页表或内核栈只创建了一部分。
+  if(p->kama_kernelpgtbl && p->kstack){
+    void *kstack_pa = (void*)kvmpa(p->kama_kernelpgtbl, p->kstack);
+    kfree(kstack_pa);
+    p->kstack = 0;
+  }
+
+  //不能使用proc_freepagetable释放页表，因为其不仅会
+  //释放页表本身，还会把页表内的叶节点对应的物理页也释放
+  //这会导致内核运行所需要的关键物理页被释放，造成内核崩溃
+  //因为这个物理页不止一个进程会使用到
+
+  //递归释放进程独享的页表，释放页表本身所占用的空间，但不释放页表指向的物理页
+  if(p->kama_kernelpgtbl){
+    kama_kvm_free_kernelpgtbl(p->kama_kernelpgtbl);
+    p->kama_kernelpgtbl = 0;
+  }
   p->state = UNUSED;
 }
 
@@ -184,6 +238,23 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
   uvmfree(pagetable, sz);
 }
 
+//递归释放一个内核页表中的所有映射，但是不释放其指向的物理页
+static void
+kama_kvm_free_kernelpgtbl(pagetable_t pagetable) {
+  if(pagetable == 0)
+    return;
+
+  for(int i=0; i<512; ++i) {
+    pte_t pte = pagetable[i];
+    uint64 child = PTE2PA(pte);
+    if((pte&PTE_V) && (pte&(PTE_R|PTE_W|PTE_X))==0 ) {
+      kama_kvm_free_kernelpgtbl((pagetable_t)child);
+      pagetable[i] = 0;
+    }
+  }
+  kfree((void*)pagetable); //释放当前级别页表所占用的空间
+}
+
 // 下面是调用 exec("/init") 的极小用户程序机器码，可用 od -t xC 查看。
 uchar initcode[] = {
   0x17, 0x05, 0x00, 0x00, 0x13, 0x05, 0x45, 0x02,
@@ -203,10 +274,13 @@ userinit(void)
 
   p = allocproc();
   initproc = p;
-  
+
   // 分配一个用户页，把 initcode 的指令和数据复制进去。
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
+
+  //同步程序内存映射到进程内核页表中
+  kama_kvmcopymappings(p->pagetable, p->kama_kernelpgtbl, 0, p->sz);
 
   // 为系统第一次从内核“返回”用户态准备入口地址和栈。
   p->trapframe->epc = 0;      // 用户程序计数器。
@@ -229,11 +303,29 @@ growproc(int n)
 
   sz = p->sz;
   if(n > 0){
-    if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
+    uint64 oldsz = sz;
+    uint64 newsz = uvmalloc(p->pagetable, oldsz, oldsz + n);
+    if(newsz == 0)
+      return -1;
+
+    // 用户页表扩容成功后，将新增页面的映射同步到进程内核页表。
+    if(kama_kvmcopymappings(p->pagetable,
+                            p->kama_kernelpgtbl,
+                            oldsz,
+                            newsz - oldsz) != 0){
+      // 同步失败时回滚刚刚分配的用户页面，保持两个页表一致。
+      uvmdealloc(p->pagetable, newsz, oldsz);
       return -1;
     }
+
+    sz = newsz;
   } else if(n < 0){
-    sz = uvmdealloc(p->pagetable, sz, sz + n);
+    uint64 oldsz = sz;
+    uint64 newsz = uvmdealloc(p->pagetable, oldsz, oldsz + n);
+
+    // 用户页表缩容后，解除进程内核页表中相同范围的别名映射。
+    kama_kvmdealloc(p->kama_kernelpgtbl, oldsz, newsz);
+    sz = newsz;
   }
   p->sz = sz;
   return 0;
@@ -252,8 +344,10 @@ fork(void)
     return -1;
   }
 
-  // 复制父进程的用户地址空间到子进程。
-  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
+  // 复制父进程的用户地址空间到子进程:先给子进程复制一套独立的用户内存
+  //加入调用kvmcopymappings，将新进程用户页表中的映射，拷贝一份同步到到新进程内核页表中
+  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0 ||
+     kama_kvmcopymappings(np->pagetable, np->kama_kernelpgtbl, 0, p->sz)<0){
     freeproc(np);
     release(&np->lock);
     return -1;
@@ -343,7 +437,7 @@ exit(int status)
   acquire(&p->lock);
   struct proc *original_parent = p->parent;
   release(&p->lock);
-  
+
   // 唤醒正在 wait() 的父进程需要持有父进程锁；按“先父后子”的锁顺序，必须先锁父进程。
   acquire(&original_parent->lock);
 
@@ -409,7 +503,7 @@ wait(uint64 addr)
       release(&p->lock);
       return -1;
     }
-    
+
     // 以当前进程地址为睡眠通道，等待子进程退出时唤醒。
     sleep(p, &p->lock);  //DOC: wait-sleep
   }
@@ -424,12 +518,12 @@ scheduler(void)
 {
   struct proc *p;
   struct cpu *c = mycpu();
-  
+
   c->proc = 0;
   for(;;){
     // 保持设备中断开启，使等待 I/O 的进程能够被中断处理程序唤醒，避免系统僵死。
     intr_on();
-    
+
     int found = 0;
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
@@ -437,7 +531,16 @@ scheduler(void)
         // 切换到选中的进程。该进程负责释放自己的锁，并在切回调度器之前重新取得它。
         p->state = RUNNING;
         c->proc = p;
+
+        //切换到进程独立的内核页表
+        w_satp(MAKE_SATP(p->kama_kernelpgtbl));
+        sfence_vma(); //清除快表缓存，刷新TLB缓存，以确保地址转换表的更改生效。因为相同的虚拟地址映射的物理地址不同
+
+        //调度，执行进程 切换一组cpu寄存器
         swtch(&c->context, &p->context);
+
+        //切换回全局内核页表
+        kvminithart();
 
         // 进程本轮运行结束；切回前它应当已经更新了 p->state。
         c->proc = 0;
@@ -515,7 +618,7 @@ void
 sleep(void *chan, struct spinlock *lk)
 {
   struct proc *p = myproc();
-  
+
   // 修改 p->state 并调用 sched 前必须持有 p->lock。取得它以后，wakeup 也必须
   // 等待同一把锁，因此不会在释放 lk 与进入睡眠之间丢失唤醒。
   if(lk != &p->lock){  //DOC: sleeplock0
