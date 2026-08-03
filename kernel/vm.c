@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * 内核页表。
@@ -326,17 +328,16 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 }
 
 // 根据父进程页表，将其内存复制到子进程页表。
-// 页表结构和物理页内容都会被深拷贝。
-// 成功返回 0，失败返回 -1，并释放本次已经分配的页面。
+// COW fork 只复制页表映射：父子暂时共享物理页，原可写页改为只读 COW 页。
+// 成功返回 0，失败返回 -1，并撤销子进程已经建立的共享映射。
 int
 uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
-  // 逐页复制内容，并沿用父进程原有的 PTE 权限建立子进程映射。
+  // 逐页复用父进程的物理页，并为每个新增的子进程映射增加引用计数。
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
@@ -345,21 +346,24 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     pa = PTE2PA(*pte);
     // 只提取权限与状态位，随后让子进程映射继承相同属性。
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    // 复制整个物理页，因此父子进程之后修改各自内存不会互相影响。
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      // 当前页映射失败时先释放它，再由 err 回收之前已映射的页面。
-      kfree(mem);
-      goto err;
+    // 原本可写的页面才有资格在写故障后恢复写权限。文本等天然只读页
+    // 保持普通只读映射，避免把非法写入误判成 COW。
+    if(flags & PTE_W){
+      flags = (flags & ~PTE_W) | PTE_COW;
+      *pte = PA2PTE(pa) | flags;
     }
+    if(mappages(new, i, PGSIZE, pa, flags) != 0)
+      goto err;
+    kama_krefpage(pa);
   }
+  // 父页表的写权限已经收紧，清掉旧的可写 TLB 缓存后再返回用户态。
+  sfence_vma();
   return 0;
 
  err:
-  // i 之前的页面已经复制成功，失败时统一解除映射并释放物理页。
+  // kfree() 只减少共享引用；最后一个引用消失时才会真正回收物理页。
   uvmunmap(new, 0, i / PGSIZE, 1);
+  sfence_vma();
   return -1;
 }
 
@@ -378,6 +382,69 @@ uvmclear(pagetable_t pagetable, uint64 va)
   *pte &= ~PTE_U;
 }
 
+// 检查指定页表中的地址是否为可由 COW 机制处理的用户页。
+static int
+kama_pagetablecheckcowpage(pagetable_t pagetable, uint64 sz, uint64 va)
+{
+  pte_t *pte;
+
+  if(va >= sz || va >= MAXVA)
+    return 0;
+  pte = walk(pagetable, va, 0);
+  if(pte == 0)
+    return 0;
+  return (*pte & (PTE_V | PTE_U | PTE_COW)) ==
+         (PTE_V | PTE_U | PTE_COW);
+}
+
+// 处理当前进程的一次 COW 写入前拆分页：必要时复制物理页，随后原地
+// 更新 PTE。原地改写避免先 unmap 再 mappages 产生瞬时映射空洞和失败回滚。
+static int
+kama_pagetablecowcopy(pagetable_t pagetable, uint64 va)
+{
+  pte_t *pte;
+  uint64 va0, old_pa;
+  void *new_pa;
+  uint flags;
+
+  if(va >= MAXVA)
+    return -1;
+  va0 = PGROUNDDOWN(va);
+  pte = walk(pagetable, va0, 0);
+  if(pte == 0 || (*pte & (PTE_V | PTE_U | PTE_COW)) !=
+                   (PTE_V | PTE_U | PTE_COW))
+    return -1;
+
+  old_pa = PTE2PA(*pte);
+  new_pa = kama_kcopy_n_deref((void*)old_pa);
+  if(new_pa == 0)
+    return -1;
+
+  flags = (PTE_FLAGS(*pte) | PTE_W) & ~PTE_COW;
+  *pte = PA2PTE((uint64)new_pa) | flags;
+  sfence_vma();
+  return 0;
+}
+
+// usertrap() 使用的文档约定接口：检查当前进程的故障地址。
+int
+kama_uvmcheckcowpage(uint64 va)
+{
+  struct proc *p = myproc();
+  return kama_pagetablecheckcowpage(p->pagetable, p->sz, va);
+}
+
+// usertrap() 使用的文档约定接口：拆分当前进程的 COW 页。
+int
+kama_uvmcowcopy(uint64 va)
+{
+  struct proc *p = myproc();
+
+  if(!kama_pagetablecheckcowpage(p->pagetable, p->sz, va))
+    return -1;
+  return kama_pagetablecowcopy(p->pagetable, va);
+}
+
 // 从内核复制数据到用户空间。
 // 将 src 开始的 len 个字节复制到给定页表中的虚拟地址 dstva。
 // 成功返回 0，失败返回 -1。
@@ -389,6 +456,12 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
   while(len > 0){
     // 向下取整得到 dstva 所在用户页的起始虚拟地址。
     va0 = PGROUNDDOWN(dstva);
+    // copyout() 由内核主动写用户页，不会触发用户态写页错误，因此必须
+    // 在真正写入前显式走同一套 COW 拆分页流程。
+    if(kama_pagetablecheckcowpage(pagetable, MAXVA, va0)){
+      if(kama_pagetablecowcopy(pagetable, va0) < 0)
+        return -1;
+    }
     // walkaddr 同时完成页表查询和用户访问权限检查。
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)

@@ -61,6 +61,11 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(r_scause() == 15 && kama_uvmcheckcowpage(r_stval())){
+    // scause=15 表示用户态写页错误。只有带 PTE_COW 标记的页面才允许
+    // 拆分并恢复写权限；普通只读页上的非法写入仍会走下面的杀进程路径。
+    if(kama_uvmcowcopy(r_stval()) < 0)
+      p->killed = 1;
   } else if((which_dev = devintr()) != 0){
     // 已识别并处理设备中断。
   } else {

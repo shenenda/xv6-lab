@@ -25,10 +25,20 @@ struct {
   struct run *freelist;
 } kmem;
 
+// 以 KERNBASE 后的物理页号为下标，记录每个物理页当前被引用的次数。
+// 只有引用计数降到 0 的页面才允许重新进入空闲链表。
+#define PA2PGREF_ID(p) (((uint64)(p) - KERNBASE) / PGSIZE)
+#define PGREF_MAX_ENTRIES ((PHYSTOP - KERNBASE) / PGSIZE)
+#define PA2PGREF(p) (pageref[PA2PGREF_ID(p)])
+
+static int pageref[PGREF_MAX_ENTRIES];
+static struct spinlock pgreflock;
+
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+  initlock(&pgreflock, "pgref");
   // 将内核镜像末尾到物理内存上限之间的完整页面加入空闲链表。
   freerange(end, (void*)PHYSTOP);
 }
@@ -41,8 +51,14 @@ freerange(void *pa_start, void *pa_end)
   p = (char*)PGROUNDUP((uint64)pa_start);
   // char* 指针每加一表示前进一个字节，因此可直接按 PGSIZE 跨页。
   // 只有整页都位于区间内时才释放，末尾不足一页的部分会被跳过。
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
+  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE){
+    // kfree() 统一执行“引用减一”；初始化空闲页时先建立唯一引用，
+    // 再让 kfree() 把计数从 1 降到 0，避免负引用计数破坏不变量。
+    acquire(&pgreflock);
+    PA2PGREF(p) = 1;
+    release(&pgreflock);
     kfree(p);
+  }
 }
 
 // 释放 pa 指向的一页物理内存。
@@ -56,6 +72,19 @@ kfree(void *pa)
   // 取模结果不为 0 表示 pa 不是页面起始地址。
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
+
+  // 解除一次引用。仍有页表或内核对象引用该页时，绝不能把它交回分配器。
+  acquire(&pgreflock);
+  if(PA2PGREF(pa) < 1){
+    release(&pgreflock);
+    panic("kfree: ref");
+  }
+  PA2PGREF(pa)--;
+  int refs = PA2PGREF(pa);
+  release(&pgreflock);
+
+  if(refs > 0)
+    return;
 
   // 用固定垃圾值覆盖整页，便于尽早暴露释放后仍访问该页的悬空引用。
   memset(pa, 1, PGSIZE);
@@ -87,5 +116,83 @@ kalloc(void)
   // 页面已经从共享链表移除，后续填充无需继续占用自旋锁。
   if(r)
     memset((char*)r, 5, PGSIZE); // 用垃圾值填充，帮助发现未初始化内存的使用。
+
+  if(r){
+    // 新分配页由调用者持有唯一引用。计数必须在页面被分享前建立。
+    acquire(&pgreflock);
+    if(PA2PGREF(r) != 0){
+      release(&pgreflock);
+      panic("kalloc: ref");
+    }
+    PA2PGREF(r) = 1;
+    release(&pgreflock);
+  }
   return (void*)r;
+}
+
+// fork() 新增一个共享映射时，为对应物理页增加一次引用。
+void
+kama_krefpage(uint64 pa)
+{
+  if((pa % PGSIZE) != 0 || pa < KERNBASE || pa >= PHYSTOP)
+    panic("krefpage");
+
+  acquire(&pgreflock);
+  if(PA2PGREF(pa) < 1){
+    release(&pgreflock);
+    panic("krefpage: ref");
+  }
+  PA2PGREF(pa)++;
+  release(&pgreflock);
+}
+
+// 为 COW 写入准备私有页，并解除调用者对旧共享页的一次引用。
+// 如果调用者已经是最后一个引用者，只需复用原页而不进行无意义复制。
+void *
+kama_kcopy_n_deref(void *pa)
+{
+  char *mem;
+
+  if(((uint64)pa % PGSIZE) != 0 || (uint64)pa < KERNBASE ||
+     (uint64)pa >= PHYSTOP)
+    panic("kcopy: pa");
+
+  acquire(&pgreflock);
+  if(PA2PGREF(pa) < 1){
+    release(&pgreflock);
+    panic("kcopy: ref");
+  }
+  if(PA2PGREF(pa) == 1){
+    release(&pgreflock);
+    return pa;
+  }
+  release(&pgreflock);
+
+  // 分配和整页复制都可能耗时，不能放在引用计数自旋锁的临界区内。
+  mem = kalloc();
+  if(mem == 0){
+    // 等待分配期间其他共享者可能已经退出；此时原页可直接复用。
+    acquire(&pgreflock);
+    int sole_owner = PA2PGREF(pa) == 1;
+    release(&pgreflock);
+    return sole_owner ? pa : 0;
+  }
+  memmove(mem, pa, PGSIZE);
+
+  // 复制期间共享者也可能退出，因此重新检查。若已成为唯一引用者，
+  // 丢弃刚分配的页并直接恢复原页写权限；否则转移本次引用到新页。
+  acquire(&pgreflock);
+  if(PA2PGREF(pa) < 1){
+    release(&pgreflock);
+    panic("kcopy: lost ref");
+  }
+  if(PA2PGREF(pa) == 1){
+    release(&pgreflock);
+    kfree(mem);
+    return pa;
+  }
+  PA2PGREF(pa)--;
+  release(&pgreflock);
+
+  return mem;
 }
