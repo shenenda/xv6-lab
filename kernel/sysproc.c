@@ -41,14 +41,29 @@ sys_wait(void)
 uint64
 sys_sbrk(void)
 {
-  int addr;
+  uint64 addr;
   int n;
+  struct proc *p = myproc();
 
   if(argint(0, &n) < 0)
     return -1;
-  addr = myproc()->sz;
-  if(growproc(n) < 0)
-    return -1;
+
+  addr = p->sz;
+  if(n > 0){
+    // 惰性分配只扩大进程的合法虚拟地址范围，不立即取得物理页。
+    // 同时阻止地址空间越过 Sv39 中 xv6 允许使用的最高虚拟地址。
+    if(p->sz >= MAXVA || (uint64)n > MAXVA - p->sz)
+      return -1;
+    p->sz += n;
+  } else if(n < 0){
+    // 收缩地址空间必须立即撤销现有映射；未被触碰的空洞由
+    // 支持惰性页的 uvmunmap() 安全跳过。
+    uint64 decrease = (uint64)(-(long)n);
+    if(decrease > p->sz)
+      return -1;
+    p->sz = uvmdealloc(p->pagetable, p->sz, p->sz - decrease);
+  }
+
   return addr;
 }
 

@@ -3,6 +3,8 @@
 #include "memlayout.h"
 #include "elf.h"
 #include "riscv.h"
+#include "spinlock.h"
+#include "proc.h"
 #include "defs.h"
 #include "fs.h"
 
@@ -191,10 +193,11 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     // 这里只查找已有映射，所以 alloc 传 0，禁止创建新页表。
+    // 惰性分配允许合法地址范围内存在尚未建立 PTE 的空洞。
     if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
+      continue;
     if((*pte & PTE_V) == 0)
-      panic("uvmunmap: not mapped");
+      continue;
     // 只有叶子 PTE 才代表实际页面；仅含 PTE_V 的项指向下一级页表。
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
@@ -338,10 +341,12 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 
   // 逐页复制内容，并沿用父进程原有的 PTE 权限建立子进程映射。
   for(i = 0; i < sz; i += PGSIZE){
+    // 父进程可能只声明了这段地址，而从未触碰对应的惰性页。
+    // 子进程继承同一个虚拟地址空洞即可，不应为它提前分配物理页。
     if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
+      continue;
     if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+      continue;
     pa = PTE2PA(*pte);
     // 只提取权限与状态位，随后让子进程映射继承相同属性。
     flags = PTE_FLAGS(*pte);
@@ -378,6 +383,51 @@ uvmclear(pagetable_t pagetable, uint64 va)
   *pte &= ~PTE_U;
 }
 
+// 判断 va 是否属于当前进程通过 sbrk() 声明、但尚未建立映射的惰性堆页。
+int
+kama_uvmshouldallocate(uint64 va)
+{
+  pte_t *pte;
+  struct proc *p = myproc();
+
+  if(p == 0 || va >= MAXVA || va >= p->sz)
+    return 0;
+
+  // exec 在用户栈下方留有一页保护页。惰性堆位于当前用户栈页之上，
+  // 因此只允许为栈页顶端及以上、且低于 p->sz 的地址补映射。
+  // 这里必须使用 trapframe 中保存的用户 sp，内核态 r_sp() 得到的是内核栈。
+  if(va < PGROUNDUP(p->trapframe->sp))
+    return 0;
+
+  pte = walk(p->pagetable, PGROUNDDOWN(va), 0);
+  return pte == 0 || (*pte & PTE_V) == 0;
+}
+
+// 为当前进程的一页惰性地址分配清零物理页并建立用户映射。
+// 失败时标记进程，统一由陷阱/系统调用返回路径终止并回收其地址空间。
+void
+kama_uvmlazyallocate(uint64 va)
+{
+  char *pa;
+  struct proc *p = myproc();
+  uint64 va0 = PGROUNDDOWN(va);
+
+  pa = kalloc();
+  if(pa == 0){
+    printf("lazy alloc: out of memory\n");
+    p->killed = 1;
+    return;
+  }
+
+  memset(pa, 0, PGSIZE);
+  if(mappages(p->pagetable, va0, PGSIZE, (uint64)pa,
+              PTE_W | PTE_X | PTE_R | PTE_U) != 0){
+    printf("lazy alloc: failed to map page\n");
+    kfree(pa);
+    p->killed = 1;
+  }
+}
+
 // 从内核复制数据到用户空间。
 // 将 src 开始的 len 个字节复制到给定页表中的虚拟地址 dstva。
 // 成功返回 0，失败返回 -1。
@@ -391,6 +441,14 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
     va0 = PGROUNDDOWN(dstva);
     // walkaddr 同时完成页表查询和用户访问权限检查。
     pa0 = walkaddr(pagetable, va0);
+    // 内核替用户访问内存时不会由硬件触发用户页错误，所以必须在软件
+    // copy 路径中按页补做惰性分配。仅允许修改当前进程自己的页表，
+    // 避免 exec 正在构造的新页表误触发对旧地址空间的分配。
+    if(pa0 == 0 && pagetable == myproc()->pagetable &&
+       kama_uvmshouldallocate(dstva)){
+      kama_uvmlazyallocate(dstva);
+      pa0 = walkaddr(pagetable, va0);
+    }
     if(pa0 == 0)
       return -1;
     // 每轮只复制当前页剩余的空间，跨页后重新查询下一页的物理地址。
@@ -420,6 +478,11 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
     // 先定位 srcva 所在页，再将该用户页转换成内核可访问的物理地址。
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
+    if(pa0 == 0 && pagetable == myproc()->pagetable &&
+       kama_uvmshouldallocate(srcva)){
+      kama_uvmlazyallocate(srcva);
+      pa0 = walkaddr(pagetable, va0);
+    }
     if(pa0 == 0)
       return -1;
     // 本轮最多读取当前页尾，不能一次 memmove 直接跨越两张物理页。
@@ -451,6 +514,11 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   while(got_null == 0 && max > 0){
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
+    if(pa0 == 0 && pagetable == myproc()->pagetable &&
+       kama_uvmshouldallocate(srcva)){
+      kama_uvmlazyallocate(srcva);
+      pa0 = walkaddr(pagetable, va0);
+    }
     // 外层循环按页转换地址，避免直接跨越用户页边界读取。
     if(pa0 == 0)
       return -1;

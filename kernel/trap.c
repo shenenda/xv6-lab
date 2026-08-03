@@ -63,6 +63,12 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // 已识别并处理设备中断。
+  } else if((r_scause() == 13 || r_scause() == 15) &&
+            kama_uvmshouldallocate(r_stval())){
+    // scause=13/15 分别表示用户态加载/存储页错误。若故障地址属于
+    // sbrk() 已声明但尚未映射的堆区，则在第一次访问时补上物理页。
+    // 不推进 epc，返回用户态后让 CPU 重新执行刚才失败的指令。
+    kama_uvmlazyallocate(r_stval());
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
