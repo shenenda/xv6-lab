@@ -25,9 +25,23 @@ barrier_init(void)
 static void 
 barrier()
 {
-  // 在此补充代码：持有 barrier_mutex 更新到达计数；最后一个线程推进 round 并广播，
-  // 其他线程必须用 while 检查轮次并在 barrier_cond 上等待，以处理虚假唤醒。
-  
+  pthread_mutex_lock(&bstate.barrier_mutex);
+
+  int this_round = bstate.round;
+  bstate.nthread++;
+
+  if (bstate.nthread == nthread) {
+    // The last arrival opens this round and resets the reusable barrier.
+    bstate.nthread = 0;
+    bstate.round++;
+    pthread_cond_broadcast(&bstate.barrier_cond);
+  } else {
+    // Recheck the generation after every wake-up; wake-ups may be spurious.
+    while (bstate.round == this_round)
+      pthread_cond_wait(&bstate.barrier_cond, &bstate.barrier_mutex);
+  }
+
+  pthread_mutex_unlock(&bstate.barrier_mutex);
 }
 
 static void *

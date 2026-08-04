@@ -10,15 +10,34 @@
 #define STACK_SIZE  8192
 #define MAX_THREAD  4
 
+// A user thread only needs the registers that must survive thread_switch().
+struct context {
+  uint64 ra;
+  uint64 sp;
+
+  // callee-saved registers
+  uint64 s0;
+  uint64 s1;
+  uint64 s2;
+  uint64 s3;
+  uint64 s4;
+  uint64 s5;
+  uint64 s6;
+  uint64 s7;
+  uint64 s8;
+  uint64 s9;
+  uint64 s10;
+  uint64 s11;
+};
 
 struct thread {
   char       stack[STACK_SIZE]; /* 该线程独占的用户栈。 */
   int        state;             /* 状态取 FREE、RUNNING 或 RUNNABLE。 */
-
+  struct context context;       /* 线程切换时保存的最小寄存器上下文。 */
 };
 struct thread all_thread[MAX_THREAD];
 struct thread *current_thread;
-extern void thread_switch(uint64, uint64);
+extern void thread_switch(struct context *old, struct context *new);
               
 void 
 thread_init(void)
@@ -57,9 +76,7 @@ thread_schedule(void)
     next_thread->state = RUNNING;
     t = current_thread;
     current_thread = next_thread;
-    /* 在此补充代码：调用 thread_switch，把 t 的寄存器上下文保存到其线程结构中，
-     * 并从 next_thread 的线程结构恢复新上下文。传入的应是两份上下文存储区地址。
-     */
+    thread_switch(&t->context, &next_thread->context);
   } else
     next_thread = 0;
 }
@@ -73,8 +90,18 @@ thread_create(void (*func)())
   for (t = all_thread; t < all_thread + MAX_THREAD; t++) {
     if (t->state == FREE) break;
   }
+  if (t == all_thread + MAX_THREAD) {
+    printf("thread_create: no free thread slots\n");
+    exit(-1);
+  }
+
+  // A reused slot must not retain registers from its previous incarnation.
+  memset(&t->context, 0, sizeof(t->context));
   t->state = RUNNABLE;
-  // 在此补充代码：初始化新线程栈顶和首次运行时的返回地址。
+  // thread_switch() ends in ret, so ra is the first instruction to run.
+  t->context.ra = (uint64)func;
+  // The stack grows down. Keep the initial stack pointer 16-byte aligned.
+  t->context.sp = ((uint64)(t->stack + STACK_SIZE)) & ~((uint64)0xf);
 }
 
 void 

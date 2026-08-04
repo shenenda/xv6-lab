@@ -16,6 +16,7 @@ struct entry {
 struct entry *table[NBUCKET];
 int keys[NKEYS];
 int nthread = 1;
+pthread_mutex_t lock[NBUCKET];
 
 double
 now()
@@ -40,6 +41,9 @@ void put(int key, int value)
 {
   int i = key % NBUCKET;
 
+  // Operations on one bucket share a lock; different buckets remain parallel.
+  pthread_mutex_lock(&lock[i]);
+
   // 先遍历目标桶，判断键是否已经存在。
   struct entry *e = 0;
   for (e = table[i]; e != 0; e = e->next) {
@@ -53,6 +57,8 @@ void put(int key, int value)
     // 不存在时把新节点插入桶链表头部。
     insert(key, value, &table[i], table[i]);
   }
+
+  pthread_mutex_unlock(&lock[i]);
 }
 
 static struct entry*
@@ -116,6 +122,9 @@ main(int argc, char *argv[])
   for (int i = 0; i < NKEYS; i++) {
     keys[i] = random();
   }
+
+  for (int i = 0; i < NBUCKET; i++)
+    assert(pthread_mutex_init(&lock[i], NULL) == 0);
 
   //
   // 第一阶段：多个线程并发插入键值。
