@@ -20,15 +20,23 @@
 #include "fs.h"
 #include "buf.h"
 
+#define NBUCKET 17
+#define HASH(id) ((id) % NBUCKET)
+
+struct hashbuf {
+  struct buf head;
+  struct spinlock lock;
+};
+
 struct {
+  // 只串行化缓存未命中后的复查和淘汰；命中路径不获取这把全局锁。
   struct spinlock lock;
   struct buf buf[NBUF];
-
-  // 所有缓冲区通过 prev/next 组成双向链表，并按最近使用时间排序。
-  // head 是不保存数据的哨兵节点：head.next 最新，head.prev 最旧。
-  // bcache.lock 保护块到缓冲区的映射、引用计数以及这条链表。
-  struct buf head;
+  struct hashbuf buckets[NBUCKET];
 } bcache;
+
+// initlock 不复制字符串，使用静态二维数组保证锁名在 binit 返回后仍然有效。
+static char bucket_lockname[NBUCKET][16];
 
 void
 binit(void)
@@ -36,53 +44,127 @@ binit(void)
   struct buf *b;
 
   initlock(&bcache.lock, "bcache");
+  for(int i = 0; i < NBUCKET; i++){
+    snprintf(bucket_lockname[i], sizeof(bucket_lockname[i]), "bcache_%d", i);
+    initlock(&bcache.buckets[i].lock, bucket_lockname[i]);
+    bcache.buckets[i].head.prev = &bcache.buckets[i].head;
+    bcache.buckets[i].head.next = &bcache.buckets[i].head;
+  }
 
-  // 先让哨兵节点自环，再把每个缓冲区插到链表头部。
-  bcache.head.prev = &bcache.head;
-  bcache.head.next = &bcache.head;
+  // 初始化时所有缓冲区都放入 0 号桶，之后复用时再移动到目标哈希桶。
   for(b = bcache.buf; b < bcache.buf+NBUF; b++){
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
+    b->next = bcache.buckets[0].head.next;
+    b->prev = &bcache.buckets[0].head;
     initsleeplock(&b->lock, "buffer");
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+    bcache.buckets[0].head.next->prev = b;
+    bcache.buckets[0].head.next = b;
   }
 }
 
 // 在缓冲区缓存中查找设备 dev 上的指定块；若未命中则复用一个空闲缓冲区。
 // 无论命中还是复用，返回前都会持有该缓冲区自己的睡眠锁。
+// 不变量：任意 (dev, blockno) 在整个缓存中最多只有一个副本。
 static struct buf*
 bget(uint dev, uint blockno)
 {
-  struct buf *b;
+  struct buf *b, *tmp;
+  int bid = HASH(blockno);
 
-  acquire(&bcache.lock);
+  acquire(&bcache.buckets[bid].lock);
 
-  // 命中时必须在全局锁保护下增加引用计数，避免该缓冲区同时被回收复用。
-  for(b = bcache.head.next; b != &bcache.head; b = b->next){
+  // 命中路径只锁对应哈希桶，不同桶中的磁盘块可以并行查找。
+  for(b = bcache.buckets[bid].head.next;
+      b != &bcache.buckets[bid].head; b = b->next){
     if(b->dev == dev && b->blockno == blockno){
       b->refcnt++;
-      // 获取睡眠锁可能阻塞，所以先释放短期持有的全局自旋锁。
-      release(&bcache.lock);
+      acquire(&tickslock);
+      b->timestamp = ticks;
+      release(&tickslock);
+      release(&bcache.buckets[bid].lock);
       acquiresleep(&b->lock);
       return b;
     }
   }
+  release(&bcache.buckets[bid].lock);
 
-  // 未命中时，从链表尾部开始寻找引用计数为 0 的最久未使用缓冲区。
-  // 先写入新的块标识并清除 valid，随后真正读取磁盘内容。
-  for(b = bcache.head.prev; b != &bcache.head; b = b->prev){
-    if(b->refcnt == 0) {
-      b->dev = dev;
-      b->blockno = blockno;
-      b->valid = 0;
-      b->refcnt = 1;
+  // 全局锁只串行化未命中者，保证同一 (dev, blockno) 不会被重复创建。
+  // 命中者只拿一个桶锁，因此未命中路径不能长期同时持有所有桶锁。
+  acquire(&bcache.lock);
+
+  // 等待全局锁期间，另一个 CPU 可能已经缓存了目标块，所以必须再次检查。
+  acquire(&bcache.buckets[bid].lock);
+  for(b = bcache.buckets[bid].head.next;
+      b != &bcache.buckets[bid].head; b = b->next){
+    if(b->dev == dev && b->blockno == blockno){
+      b->refcnt++;
+      acquire(&tickslock);
+      b->timestamp = ticks;
+      release(&tickslock);
+      release(&bcache.buckets[bid].lock);
       release(&bcache.lock);
       acquiresleep(&b->lock);
       return b;
     }
   }
-  panic("bget: no buffers");
+  release(&bcache.buckets[bid].lock);
+
+  // 每次只锁一个桶并记录 LRU 候选；真正复用前重新加锁验证，
+  // 防止扫描期间命中者改变候选缓冲区的引用计数或时间戳。
+  for(;;){
+    b = 0;
+    int oldbid = -1;
+    uint oldest = 0;
+    for(int i = 0; i < NBUCKET; i++){
+      acquire(&bcache.buckets[i].lock);
+      for(tmp = bcache.buckets[i].head.next;
+          tmp != &bcache.buckets[i].head; tmp = tmp->next){
+        if(tmp->refcnt == 0 && (b == 0 || tmp->timestamp < oldest)){
+          b = tmp;
+          oldbid = i;
+          oldest = tmp->timestamp;
+        }
+      }
+      release(&bcache.buckets[i].lock);
+    }
+
+    if(b == 0)
+      panic("bget: no buffers");
+
+    acquire(&bcache.buckets[oldbid].lock);
+    if(b->refcnt != 0 || b->timestamp != oldest){
+      release(&bcache.buckets[oldbid].lock);
+      continue;
+    }
+
+    // 只有未命中者会同时获取两个桶锁，而未命中者又被全局锁串行化，
+    // 所以旧桶到目标桶的移动不会与另一个双锁路径形成环路等待。
+    if(oldbid != bid)
+      acquire(&bcache.buckets[bid].lock);
+
+    if(oldbid != bid){
+      b->next->prev = b->prev;
+      b->prev->next = b->next;
+      b->next = bcache.buckets[bid].head.next;
+      b->prev = &bcache.buckets[bid].head;
+      bcache.buckets[bid].head.next->prev = b;
+      bcache.buckets[bid].head.next = b;
+    }
+
+    b->dev = dev;
+    b->blockno = blockno;
+    b->valid = 0;
+    b->refcnt = 1;
+    acquire(&tickslock);
+    b->timestamp = ticks;
+    release(&tickslock);
+
+    if(oldbid != bid)
+      release(&bcache.buckets[bid].lock);
+    release(&bcache.buckets[oldbid].lock);
+    release(&bcache.lock);
+    acquiresleep(&b->lock);
+    return b;
+  }
 }
 
 // 返回已经加睡眠锁、且包含指定磁盘块有效内容的缓冲区。
@@ -110,44 +192,39 @@ bwrite(struct buf *b)
 }
 
 // 释放一个已经加锁的缓冲区。
-// 最后一个引用消失时，把它移到最近使用链表头部，供后续 LRU 选择使用。
+// 时间戳替代原链表位置表达最近使用次序，因此无需移动节点。
 void
 brelse(struct buf *b)
 {
   if(!holdingsleep(&b->lock))
     panic("brelse");
 
+  int bid = HASH(b->blockno);
   releasesleep(&b->lock);
 
-  acquire(&bcache.lock);
+  acquire(&bcache.buckets[bid].lock);
   b->refcnt--;
-  if (b->refcnt == 0) {
-    // 引用计数归零后，才允许调整链表位置并让该缓冲区成为可复用对象。
-    b->next->prev = b->prev;
-    b->prev->next = b->next;
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
-  }
-  
-  release(&bcache.lock);
+  acquire(&tickslock);
+  b->timestamp = ticks;
+  release(&tickslock);
+  release(&bcache.buckets[bid].lock);
 }
 
 // 日志系统用额外引用固定缓冲区，防止提交完成前被缓存回收。
 void
 bpin(struct buf *b) {
-  acquire(&bcache.lock);
+  int bid = HASH(b->blockno);
+  acquire(&bcache.buckets[bid].lock);
   b->refcnt++;
-  release(&bcache.lock);
+  release(&bcache.buckets[bid].lock);
 }
 
 // 撤销 bpin 增加的引用，使缓冲区重新具备被回收的条件。
 void
 bunpin(struct buf *b) {
-  acquire(&bcache.lock);
+  int bid = HASH(b->blockno);
+  acquire(&bcache.buckets[bid].lock);
   b->refcnt--;
-  release(&bcache.lock);
+  release(&bcache.buckets[bid].lock);
 }
-
 

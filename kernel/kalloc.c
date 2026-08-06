@@ -19,16 +19,25 @@ struct run {
 };
 
 struct {
-  // 多个 CPU 可能同时分配或释放页面，因此用自旋锁保护空闲链表。
+  // 每个 CPU 拥有一条空闲页链表；不同 CPU 的常规分配/释放不再争用同一把锁。
   struct spinlock lock;
   // freelist 指向空闲页单链表的表头。
   struct run *freelist;
-} kmem;
+} kmem[NCPU];
+
+// initlock 只保存名字指针，因此名字必须具有静态存储期，不能使用 kinit 的栈数组。
+static char kmem_lockname[NCPU][8];
+
+// 本地链表耗尽时一次搬运少量页面，避免逐页跨 CPU 加锁拖慢大规模分配。
+#define KMEM_STEAL_BATCH 64
 
 void
 kinit()
 {
-  initlock(&kmem.lock, "kmem");
+  for(int i = 0; i < NCPU; i++){
+    snprintf(kmem_lockname[i], sizeof(kmem_lockname[i]), "kmem_%d", i);
+    initlock(&kmem[i].lock, kmem_lockname[i]);
+  }
   // 将内核镜像末尾到物理内存上限之间的完整页面加入空闲链表。
   freerange(end, (void*)PHYSTOP);
 }
@@ -63,11 +72,15 @@ kfree(void *pa)
   // 释放后不再保留原页面内容，可将页首强制转换成空闲链表节点。
   r = (struct run*)pa;
 
-  acquire(&kmem.lock);
+  // 关中断期间 CPU 编号保持稳定，页面归还到当前 CPU 的空闲链表。
+  push_off();
+  int id = cpuid();
+  acquire(&kmem[id].lock);
   // 采用头插法把页面压入空闲链表，操作时间为 O(1)。
-  r->next = kmem.freelist;
-  kmem.freelist = r;
-  release(&kmem.lock);
+  r->next = kmem[id].freelist;
+  kmem[id].freelist = r;
+  release(&kmem[id].lock);
+  pop_off();
 }
 
 // 分配一页 4096 字节的物理内存，并返回内核可直接访问的指针。
@@ -77,12 +90,54 @@ kalloc(void)
 {
   struct run *r;
 
-  acquire(&kmem.lock);
-  // 从链表头取出一个空闲页；freelist 为 0 时 r 也为 0。
-  r = kmem.freelist;
+  push_off();
+  int id = cpuid();
+
+  acquire(&kmem[id].lock);
+  // 优先从当前 CPU 的链表头取页，常见路径只涉及一把本地锁。
+  r = kmem[id].freelist;
   if(r)
-    kmem.freelist = r->next;
-  release(&kmem.lock);
+    kmem[id].freelist = r->next;
+  release(&kmem[id].lock);
+
+  // 本地链表为空时，从其他 CPU 窃取一批页面。
+  // 每次最多搬运 KMEM_STEAL_BATCH 页，避免 countfree 一类大规模分配逐页跨 CPU 加锁。
+  // 搬运时不持有本地锁再申请远端锁，避免两个 CPU 形成 AB/BA 相互等待。
+  if(r == 0){
+    for(int antid = 0; antid < NCPU; antid++){
+      if(antid == id)
+        continue;
+      acquire(&kmem[antid].lock);
+      r = kmem[antid].freelist;
+      struct run *tail = r;
+      int n = 1;
+      while(tail && tail->next && n < KMEM_STEAL_BATCH){
+        tail = tail->next;
+        n++;
+      }
+      if(tail){
+        kmem[antid].freelist = tail->next;
+        tail->next = 0;
+      }
+      release(&kmem[antid].lock);
+
+      if(r){
+        // 批次中的第一页直接返回，其余页面转入当前 CPU 的链表。
+        // 远端锁已释放，因此这里仍然只持有一把 kmem 锁。
+        struct run *rest = r->next;
+        r->next = 0;
+        if(rest){
+          acquire(&kmem[id].lock);
+          tail->next = kmem[id].freelist;
+          kmem[id].freelist = rest;
+          release(&kmem[id].lock);
+        }
+        break;
+      }
+    }
+  }
+
+  pop_off();
 
   // 页面已经从共享链表移除，后续填充无需继续占用自旋锁。
   if(r)

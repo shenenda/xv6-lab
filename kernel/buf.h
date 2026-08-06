@@ -7,6 +7,6 @@ struct buf {
   uint refcnt;
   struct buf *prev; // LRU 缓存双向链表中的前驱
   struct buf *next;
+  uint timestamp;   // 最近一次使用的时钟滴答，用于跨哈希桶选择 LRU 缓冲区
   uchar data[BSIZE];
 };
-
