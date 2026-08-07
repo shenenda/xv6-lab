@@ -109,6 +109,9 @@ allocproc(void)
 found:
   p->pid = allocpid();
 
+  // 复用 proc 槽位前清空旧的 VMA 元数据；此时还没有任何映射或文件引用。
+  memset(p->vmas, 0, sizeof(p->vmas));
+
   // 为保存用户寄存器的 trapframe 分配一页内存。
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
     release(&p->lock);
@@ -281,6 +284,15 @@ fork(void)
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
+  // 只继承 VMA 元数据和文件引用，不复制已装入的高地址物理页。
+  // 子进程首次访问时会从文件重新惰性装入。
+  for(i = 0; i < NVMA; i++){
+    if(p->vmas[i].valid){
+      np->vmas[i] = p->vmas[i];
+      np->vmas[i].f = filedup(p->vmas[i].f);
+    }
+  }
+
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
@@ -322,6 +334,10 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+  // 回写共享脏页并释放 VMA。此处尚未持有 p->lock，允许 inode 睡眠锁
+  // 和日志系统在 I/O 等待期间让当前进程睡眠。
+  vmafree(p, p->pagetable);
 
   // 关闭所有打开的文件，并清空文件描述符表。
   for(int fd = 0; fd < NOFILE; fd++){

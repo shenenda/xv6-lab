@@ -2,6 +2,7 @@ struct buf;
 struct context;
 struct file;
 struct inode;
+struct kama_vma;
 struct pipe;
 struct proc;
 struct spinlock;
@@ -33,6 +34,12 @@ void            fileinit(void);
 int             fileread(struct file*, uint64, int n);
 int             filestat(struct file*, uint64 addr);
 int             filewrite(struct file*, uint64, int n);
+
+// mmap / VMA
+struct kama_vma* findvma(struct proc*, uint64);
+int             vmaalloc(uint64);
+void            vmafree(struct proc*, pagetable_t);
+void            vmaunmap(pagetable_t, uint64, uint64, struct kama_vma*);
 
 // fs.c
 void            fsinit(int);

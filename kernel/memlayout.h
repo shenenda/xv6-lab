@@ -65,3 +65,7 @@
 //   TRAPFRAME (p->trapframe, used by the trampoline)
 //   TRAMPOLINE (the same page as in the kernel)
 #define TRAPFRAME (TRAMPOLINE - PGSIZE)
+
+// mmap 创建的 VMA 位于 trapframe 下方，并从高地址向低地址增长。
+// MMAPEND 是映射区的开区间上界，避免覆盖 trapframe。
+#define MMAPEND TRAPFRAME

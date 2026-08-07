@@ -78,6 +78,19 @@ struct trapframe {
 
 enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+// 记录 mmap 创建的一段连续虚拟地址区域及其文件后备信息。
+struct kama_vma {
+  int valid;              // 该槽位当前是否有效。
+  uint64 vastart;         // 映射起始虚拟地址，按页对齐。
+  uint64 sz;              // 映射长度，按页向上取整。
+  struct file *f;         // 映射持有的独立文件引用。
+  int prot;               // PROT_READ/PROT_WRITE/PROT_EXEC。
+  int flags;              // MAP_SHARED 或 MAP_PRIVATE。
+  uint64 offset;          // 映射起点对应的文件偏移。
+};
+
+#define NVMA 16
+
 // 每个进程各自维护的状态。
 struct proc {
   struct spinlock lock;
@@ -99,4 +112,5 @@ struct proc {
   struct file *ofile[NOFILE];  // 已打开文件表。
   struct inode *cwd;           // 当前工作目录。
   char name[16];               // 进程名，仅用于调试。
+  struct kama_vma vmas[NVMA]; // 当前进程的文件内存映射区域。
 };

@@ -114,6 +114,9 @@ exec(char *path, char **argv)
   p->sz = sz;
   p->trapframe->epc = elf.entry;  // initial program counter = main
   p->trapframe->sp = sp; // initial stack pointer
+  // exec 成功后旧地址空间中的 VMA 不再存在；先回写并移除高地址映射，
+  // 再让 proc_freepagetable() 释放普通用户页和页表页。
+  vmafree(p, oldpagetable);
   proc_freepagetable(oldpagetable, oldsz);
 
   return argc; // this ends up in a0, the first argument to main(argc, argv)

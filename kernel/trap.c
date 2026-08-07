@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -63,6 +64,17 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // 已识别并处理设备中断。
+  } else if(r_scause() == 12 || r_scause() == 13 || r_scause() == 15){
+    // 指令、读或写页故障：只允许在匹配且权限允许的 VMA 中惰性装入。
+    uint64 cause = r_scause();
+    uint64 va = r_stval();
+    struct kama_vma *v = findvma(p, va);
+    int allowed = v != 0 &&
+      ((cause == 12 && (v->prot & PROT_EXEC)) ||
+       (cause == 13 && (v->prot & PROT_READ)) ||
+       (cause == 15 && (v->prot & PROT_WRITE)));
+    if(!allowed || vmaalloc(va) == 0)
+      p->killed = 1;
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());

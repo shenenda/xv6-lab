@@ -348,6 +348,9 @@ sfence_vma()
 #define PTE_W (1L << 2)
 #define PTE_X (1L << 3)
 #define PTE_U (1L << 4) // 为 1 时允许用户态访问。
+#define PTE_G (1L << 5)
+#define PTE_A (1L << 6) // 硬件访问位。
+#define PTE_D (1L << 7) // 硬件脏页位；页发生写入后置位。
 
 // 把物理地址转换到页表项中物理页号所在的位段。
 #define PA2PTE(pa) ((((uint64)pa) >> 12) << 10)

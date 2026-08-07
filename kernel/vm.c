@@ -5,6 +5,11 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "fcntl.h"
+#include "spinlock.h"
+#include "sleeplock.h"
+#include "file.h"
+#include "proc.h"
 
 /*
  * 内核页表。
@@ -195,6 +200,53 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
     // 清零 PTE 即可解除映射；调用者负责在需要时刷新 TLB。
     *pte = 0;
   }
+}
+
+// 释放 mmap 映射的页面；共享映射的脏页在释放前写回文件。
+// va 和 nbytes 都按页对齐。尚未因页故障装入的惰性页面没有有效 PTE，直接跳过。
+void
+vmaunmap(pagetable_t pagetable, uint64 va, uint64 nbytes,
+         struct kama_vma *v)
+{
+  if((va % PGSIZE) != 0 || (nbytes % PGSIZE) != 0)
+    panic("vmaunmap: not aligned");
+
+  for(uint64 a = va; a < va + nbytes; a += PGSIZE){
+    pte_t *pte = walk(pagetable, a, 0);
+    if(pte == 0 || (*pte & PTE_V) == 0)
+      continue;
+    if(PTE_FLAGS(*pte) == PTE_V)
+      panic("vmaunmap: not a leaf");
+
+    uint64 pa = PTE2PA(*pte);
+    if((*pte & PTE_D) && (v->flags & MAP_SHARED)){
+      uint64 vmaoff = a - v->vastart;
+      uint64 fileoff = v->offset + vmaoff;
+      uint n = PGSIZE;
+      if(vmaoff + n > v->sz)
+        n = v->sz - vmaoff;
+
+      begin_op();
+      ilock(v->f->ip);
+      // mmaptest 允许映射越过文件末尾并读取零；回写时不把这些补零字节
+      // 追加进源文件，只写回原文件范围内的脏数据。
+      if(fileoff >= v->f->ip->size){
+        n = 0;
+      } else if(fileoff + n > v->f->ip->size){
+        n = v->f->ip->size - fileoff;
+      }
+      if(n > 0 && writei(v->f->ip, 0, pa, fileoff, n) != n)
+        panic("vmaunmap: writei");
+      iunlock(v->f->ip);
+      end_op();
+    }
+
+    kfree((void*)pa);
+    *pte = 0;
+  }
+
+  // 当前使用的是内核页表；返回用户态切换 satp 后，trampoline 会执行
+  // sfence.vma，使用户 TLB 不再使用已经清除的旧 PTE。
 }
 
 // 创建空的用户页表，内存不足时返回 0。

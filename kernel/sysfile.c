@@ -5,6 +5,7 @@
 
 #include "types.h"
 #include "riscv.h"
+#include "memlayout.h"
 #include "defs.h"
 #include "param.h"
 #include "stat.h"
@@ -484,4 +485,187 @@ sys_pipe(void)
     return -1;
   }
   return 0;
+}
+
+// 通过虚拟地址查找当前所属的 VMA。
+struct kama_vma*
+findvma(struct proc *p, uint64 va)
+{
+  for(int i = 0; i < NVMA; i++){
+    struct kama_vma *v = &p->vmas[i];
+    if(v->valid && va >= v->vastart && va - v->vastart < v->sz)
+      return v;
+  }
+  return 0;
+}
+
+// 建立文件映射。物理页暂不分配，第一次访问时由 vmaalloc() 装入。
+uint64
+sys_mmap(void)
+{
+  uint64 addr, sz, offset;
+  int prot, flags, fd;
+  struct file *f;
+
+  if(argaddr(0, &addr) < 0 || argaddr(1, &sz) < 0 ||
+     argint(2, &prot) < 0 || argint(3, &flags) < 0 ||
+     argfd(4, &fd, &f) < 0 || argaddr(5, &offset) < 0 || sz == 0)
+    return -1;
+
+  // 本实验由内核选择地址，addr 只作为兼容 mmap 接口的提示参数。
+  (void)addr;
+  (void)fd;
+
+  if((prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC)) != 0 ||
+     (flags != MAP_SHARED && flags != MAP_PRIVATE) ||
+     (offset % PGSIZE) != 0 || f->type != FD_INODE)
+    return -1;
+
+  // 读映射要求文件可读；共享可写映射最终要回写，要求文件可写。
+  if((prot & PROT_READ) && !f->readable)
+    return -1;
+  if((prot & PROT_WRITE) && flags == MAP_SHARED && !f->writable)
+    return -1;
+
+  if(sz > MMAPEND || sz + PGSIZE - 1 < sz)
+    return -1;
+  sz = PGROUNDUP(sz);
+
+  struct proc *p = myproc();
+  struct kama_vma *freev = 0;
+  uint64 vaend = MMAPEND;
+
+  // 保存第一个空槽位，同时找到现有映射中的最低地址。
+  for(int i = 0; i < NVMA; i++){
+    struct kama_vma *v = &p->vmas[i];
+    if(!v->valid){
+      if(freev == 0)
+        freev = v;
+    } else if(v->vastart < vaend){
+      vaend = PGROUNDDOWN(v->vastart);
+    }
+  }
+
+  if(freev == 0 || vaend < sz)
+    return -1;
+
+  uint64 vastart = vaend - sz;
+  // 不允许向下增长的 mmap 区与 text/data/heap/stack 区重叠。
+  if(vastart < PGROUNDUP(p->sz))
+    return -1;
+
+  freev->vastart = vastart;
+  freev->sz = sz;
+  freev->f = filedup(f);
+  freev->prot = prot;
+  freev->flags = flags;
+  freev->offset = offset;
+  freev->valid = 1;
+  return vastart;
+}
+
+// 为发生页故障的 VMA 地址分配物理页、读取文件内容并建立页表映射。
+int
+vmaalloc(uint64 va)
+{
+  struct proc *p = myproc();
+  struct kama_vma *v = findvma(p, va);
+  if(v == 0)
+    return 0;
+
+  uint64 pageva = PGROUNDDOWN(va);
+  // 已映射页面再次故障通常意味着权限错误，不能覆盖原映射。
+  if(walkaddr(p->pagetable, pageva) != 0)
+    return 0;
+
+  int perm = PTE_U;
+  if(v->prot & PROT_READ)
+    perm |= PTE_R;
+  if(v->prot & PROT_WRITE)
+    // Sv39 不允许“可写但不可读”的叶子 PTE，因此写权限同时带上读权限。
+    perm |= PTE_W | PTE_R;
+  if(v->prot & PROT_EXEC)
+    perm |= PTE_X;
+  if((perm & (PTE_R | PTE_W | PTE_X)) == 0)
+    return 0;
+
+  char *pa = kalloc();
+  if(pa == 0)
+    return 0;
+  memset(pa, 0, PGSIZE);
+
+  int nread;
+  begin_op();
+  ilock(v->f->ip);
+  nread = readi(v->f->ip, 0, (uint64)pa,
+                v->offset + (pageva - v->vastart), PGSIZE);
+  iunlock(v->f->ip);
+  end_op();
+  if(nread < 0){
+    kfree(pa);
+    return 0;
+  }
+
+  if(mappages(p->pagetable, pageva, PGSIZE, (uint64)pa, perm) < 0){
+    kfree(pa);
+    return 0;
+  }
+  return 1;
+}
+
+// 取消一段位于 VMA 首部、尾部或整个 VMA 的映射。
+uint64
+sys_munmap(void)
+{
+  uint64 addr, sz;
+  if(argaddr(0, &addr) < 0 || argaddr(1, &sz) < 0 ||
+     sz == 0 || (addr % PGSIZE) != 0 || sz + PGSIZE - 1 < sz)
+    return -1;
+
+  sz = PGROUNDUP(sz);
+  if(addr + sz < addr)
+    return -1;
+
+  struct proc *p = myproc();
+  struct kama_vma *v = findvma(p, addr);
+  if(v == 0)
+    return -1;
+
+  uint64 vend = v->vastart + v->sz;
+  uint64 unmapend = addr + sz;
+  if(unmapend > vend)
+    return -1;
+  // 实验只要求从首部或尾部收缩，不允许在 VMA 中间打洞。
+  if(addr > v->vastart && unmapend < vend)
+    return -1;
+
+  vmaunmap(p->pagetable, addr, sz, v);
+
+  if(addr == v->vastart && unmapend == vend){
+    struct file *f = v->f;
+    memset(v, 0, sizeof(*v));
+    fileclose(f);
+  } else if(addr == v->vastart){
+    v->vastart = unmapend;
+    v->offset += sz;
+    v->sz -= sz;
+  } else {
+    v->sz = addr - v->vastart;
+  }
+  return 0;
+}
+
+// 释放进程的全部 VMA。调用者不得持有自旋锁，因为回写和 fileclose 可能睡眠。
+void
+vmafree(struct proc *p, pagetable_t pagetable)
+{
+  for(int i = 0; i < NVMA; i++){
+    struct kama_vma *v = &p->vmas[i];
+    if(!v->valid)
+      continue;
+    vmaunmap(pagetable, v->vastart, v->sz, v);
+    struct file *f = v->f;
+    memset(v, 0, sizeof(*v));
+    fileclose(f);
+  }
 }
