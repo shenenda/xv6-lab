@@ -521,8 +521,8 @@ sys_mmap(void)
      (offset % PGSIZE) != 0 || f->type != FD_INODE)
     return -1;
 
-  // 读映射要求文件可读；共享可写映射最终要回写，要求文件可写。
-  if((prot & PROT_READ) && !f->readable)
+  // 文件后备页首次装入时总要读取初始内容；共享可写映射还会回写文件。
+  if(!f->readable)
     return -1;
   if((prot & PROT_WRITE) && flags == MAP_SHARED && !f->writable)
     return -1;
