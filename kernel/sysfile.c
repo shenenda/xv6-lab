@@ -280,6 +280,36 @@ create(char *path, short type, short major, short minor)
   return ip;
 }
 
+// 创建符号链接 path，并把目标路径字符串作为该 inode 的文件内容保存。
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH], path[MAXPATH];
+  struct inode *ip;
+  int n;
+
+  if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
+    return -1;
+
+  begin_op();
+  if((ip = create(path, T_SYMLINK, 0, 0)) == 0){
+    end_op();
+    return -1;
+  }
+
+  // 连同结尾的 NUL 一起保存，使 open 读回后可直接交给 namei。
+  n = strlen(target) + 1;
+  if(writei(ip, 0, (uint64)target, 0, n) != n){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  iunlockput(ip);
+  end_op();
+  return 0;
+}
+
 // 打开或创建路径，并把获得的 inode 包装成进程可见的文件描述符。
 uint64
 sys_open(void)
@@ -307,6 +337,33 @@ sys_open(void)
       return -1;
     }
     ilock(ip);
+
+    // 默认跟随符号链接；每一轮都先释放当前 inode 的锁和引用，再解析
+    // 下一条路径，既避免锁泄漏，也避免持有多把 inode 锁造成死锁。
+    int symlink_depth = 0;
+    while(ip->type == T_SYMLINK && (omode & O_NOFOLLOW) == 0){
+      if(++symlink_depth > 10 || ip->size < 1 || ip->size > MAXPATH){
+        iunlockput(ip);
+        end_op();
+        return -1;
+      }
+
+      n = ip->size;
+      if(readi(ip, 0, (uint64)path, 0, n) != n){
+        iunlockput(ip);
+        end_op();
+        return -1;
+      }
+      path[n - 1] = '\0';
+      iunlockput(ip);
+
+      if((ip = namei(path)) == 0){
+        end_op();
+        return -1;
+      }
+      ilock(ip);
+    }
+
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op();

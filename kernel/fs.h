@@ -24,10 +24,10 @@ struct superblock {
 
 #define FSMAGIC 0x10203040
 
-#define NDIRECT 12
+#define NDIRECT 11
 #define NINDIRECT (BSIZE / sizeof(uint))
-// 当前格式支持 NDIRECT 个直接块和 NINDIRECT 个一级间接块。
-#define MAXFILE (NDIRECT + NINDIRECT)
+// 一个 inode 可寻址 11 个直接块、256 个一级间接块和 256*256 个二级间接块。
+#define MAXFILE (NDIRECT + NINDIRECT + NINDIRECT * NINDIRECT)
 
 // 磁盘上的 inode 结构
 struct dinode {
@@ -36,7 +36,7 @@ struct dinode {
   short minor;          // 次设备号（仅 T_DEVICE 使用）
   short nlink;          // 文件系统中指向该 inode 的硬链接数
   uint size;            // 文件大小（字节）
-  uint addrs[NDIRECT+1];   // 数据块地址
+  uint addrs[NDIRECT+2];   // 0~10：直接索引，11：一级间接索引，12：二级间接索引
 };
 
 // 每个磁盘块可容纳的 inode 数。

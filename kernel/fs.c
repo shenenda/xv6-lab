@@ -330,7 +330,8 @@ iunlockput(struct inode *ip)
 // inode 数据块映射。
 //
 // 文件内容保存在磁盘块中。前 NDIRECT 个块号直接记录在 ip->addrs[]；
-// 后续 NINDIRECT 个块号存放在 ip->addrs[NDIRECT] 指向的一级间接块中。
+// 后续 NINDIRECT 个块号存放在 ip->addrs[NDIRECT] 指向的一级间接块中；
+// 再后面的 NINDIRECT*NINDIRECT 个块由 ip->addrs[NDIRECT+1] 二级索引。
 
 // 返回 inode ip 中第 bn 个逻辑块对应的磁盘块号；映射不存在时自动分配。
 static uint
@@ -361,6 +362,34 @@ bmap(struct inode *ip, uint bn)
     return addr;
   }
 
+  // 去掉一级间接块范围后，bn 是二级间接区域内的逻辑块号。
+  bn -= NINDIRECT;
+
+  if(bn < NINDIRECT * NINDIRECT){
+    // addrs[NDIRECT+1] 指向二级间接索引的根块。
+    if((addr = ip->addrs[NDIRECT+1]) == 0)
+      ip->addrs[NDIRECT+1] = addr = balloc(ip->dev);
+
+    // 根块的第 bn/NINDIRECT 项指向一个一级索引块。
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    if((addr = a[bn / NINDIRECT]) == 0){
+      a[bn / NINDIRECT] = addr = balloc(ip->dev);
+      log_write(bp);
+    }
+    brelse(bp);
+
+    // 一级索引块的第 bn%NINDIRECT 项指向最终的数据块。
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    if((addr = a[bn % NINDIRECT]) == 0){
+      a[bn % NINDIRECT] = addr = balloc(ip->dev);
+      log_write(bp);
+    }
+    brelse(bp);
+    return addr;
+  }
+
   panic("bmap: out of range");
 }
 
@@ -369,8 +398,8 @@ void
 itrunc(struct inode *ip)
 {
   int i, j;
-  struct buf *bp;
-  uint *a;
+  struct buf *bp, *bp2;
+  uint *a, *a2;
 
   for(i = 0; i < NDIRECT; i++){
     if(ip->addrs[i]){
@@ -391,6 +420,28 @@ itrunc(struct inode *ip)
     brelse(bp);
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
+  }
+
+  // 二级间接根块中的每个非零表项指向一个一级索引块；先释放其
+  // 数据块，再释放一级索引块，最后释放二级根块本身。
+  if(ip->addrs[NDIRECT+1]){
+    bp = bread(ip->dev, ip->addrs[NDIRECT+1]);
+    a = (uint*)bp->data;
+    for(i = 0; i < NINDIRECT; i++){
+      if(a[i]){
+        bp2 = bread(ip->dev, a[i]);
+        a2 = (uint*)bp2->data;
+        for(j = 0; j < NINDIRECT; j++){
+          if(a2[j])
+            bfree(ip->dev, a2[j]);
+        }
+        brelse(bp2);
+        bfree(ip->dev, a[i]);
+      }
+    }
+    brelse(bp);
+    bfree(ip->dev, ip->addrs[NDIRECT+1]);
+    ip->addrs[NDIRECT+1] = 0;
   }
 
   ip->size = 0;
